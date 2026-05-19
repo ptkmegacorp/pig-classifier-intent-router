@@ -19,8 +19,18 @@ export interface SkillScore {
   matchedTerms: string[];
 }
 
-export interface VoiceRouteDecision {
+export interface BroadGateDecision {
   bucket: VoiceRouteBucket;
+  confidence: number;
+  reason: string;
+  matchedTerms: string[];
+}
+
+export interface VoiceRouteDecision {
+  /** Final runtime bucket after broad gate + selector/threshold. */
+  bucket: VoiceRouteBucket;
+  /** First-stage rules gate. Later this can be a tiny classifier. */
+  broadGate: BroadGateDecision;
   candidateSkill: string | null;
   confidence: number;
   reason: string;
@@ -44,6 +54,12 @@ const STOP_WORDS = new Set([
   "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "in", "is", "it", "of", "on", "or", "the", "to", "use", "user", "when", "with",
   "asks", "ask", "agent", "ai", "pig", "pi", "current", "latest", "what", "this", "that", "there", "here",
 ]);
+
+const DIRECT_EXEC_TERMS = [
+  "focus left", "focus right", "focus up", "focus down",
+  "move window", "move left", "move right", "move up", "move down",
+  "resize", "split", "workspace", "switch workspace", "pane", "container",
+];
 
 const SKILL_ALIASES: Record<string, string[]> = {
   weather: [
@@ -85,10 +101,12 @@ function tokenize(text: string): string[] {
   );
 }
 
+function normalizeForPhrase(text: string): string {
+  return ` ${text.toLowerCase().replace(/[^a-z0-9\s-]/g, " ").replace(/\s+/g, " ").trim()} `;
+}
+
 function phraseMatches(text: string, phrase: string): boolean {
-  const normalizedText = ` ${text.toLowerCase().replace(/[^a-z0-9\s-]/g, " ").replace(/\s+/g, " ")} `;
-  const normalizedPhrase = ` ${phrase.toLowerCase().replace(/[^a-z0-9\s-]/g, " ").replace(/\s+/g, " ").trim()} `;
-  return normalizedText.includes(normalizedPhrase);
+  return normalizeForPhrase(text).includes(normalizeForPhrase(phrase));
 }
 
 function parseFrontmatter(raw: string): { name?: string; description?: string; body: string } {
@@ -137,6 +155,46 @@ export function loadSkillCatalog(): SkillCatalogEntry[] {
   return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
 
+function broadGate(text: string, catalog: SkillCatalogEntry[]): BroadGateDecision {
+  const piSkillTerms = unique(catalog.flatMap((skill) => skill.keywords));
+  const piSkillMatches = piSkillTerms.filter((term) => term.includes(" ") ? phraseMatches(text, term) : new Set(tokenize(text)).has(term));
+  const directMatches = DIRECT_EXEC_TERMS.filter((term) => phraseMatches(text, term));
+
+  if (directMatches.length > 0 && piSkillMatches.length === 0) {
+    return {
+      bucket: "direct_exec",
+      confidence: Math.min(0.99, 0.45 + directMatches.length * 0.15),
+      reason: "matched direct-exec control phrase; direct execution is reserved for future use",
+      matchedTerms: unique(directMatches),
+    };
+  }
+
+  if (piSkillMatches.length > 0) {
+    return {
+      bucket: "pi_skill",
+      confidence: Math.min(0.99, 0.35 + piSkillMatches.length * 0.12),
+      reason: "matched known skill affordance term(s); run catalog selector",
+      matchedTerms: unique(piSkillMatches),
+    };
+  }
+
+  return {
+    bucket: "normal_msg",
+    confidence: 0.05,
+    reason: "no broad deterministic affordance matched",
+    matchedTerms: [],
+  };
+}
+
+/** Current skill selector: rules/catalog scoring. Later replacement point for embeddings. */
+function selectSkillCandidate(text: string, catalog: SkillCatalogEntry[]): SkillScore[] {
+  return catalog
+    .map((skill) => scoreSkill(text, skill))
+    .filter((candidate) => candidate.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 5);
+}
+
 function scoreSkill(text: string, skill: SkillCatalogEntry): SkillScore {
   const textTokens = new Set(tokenize(text));
   const matchedTerms: string[] = [];
@@ -157,8 +215,8 @@ function scoreSkill(text: string, skill: SkillCatalogEntry): SkillScore {
 
   // Weather/location cue boost keeps the first target behavior strong while the
   // deterministic-affordance catalog remains small and rule-based.
-  if (skill.name === "weather" && /\b(in|near|for|at|around|tonight|tomorrow|today|weekend)\b/i.test(text) && matchedTerms.length > 0) {
-    score += 0.16;
+  if (skill.name === "weather" && /\b(in|near|for|at|around|tonight|tomorrow|today|weekend|jacket|umbrella|outside)\b/i.test(text) && matchedTerms.length > 0) {
+    score += 0.25;
   }
 
   return {
@@ -182,12 +240,40 @@ function scoreSkill(text: string, skill: SkillCatalogEntry): SkillScore {
  */
 export function routeVoiceTranscript(text: string): VoiceRouteDecision {
   const cleaned = text.trim();
-  const candidates = loadSkillCatalog()
-    .map((skill) => scoreSkill(cleaned, skill))
-    .filter((candidate) => candidate.score > 0)
-    .sort((a, b) => b.score - a.score)
-    .slice(0, 5);
+  const catalog = loadSkillCatalog();
+  const gate = broadGate(cleaned, catalog);
 
+  if (gate.bucket === "normal_msg") {
+    return {
+      bucket: "normal_msg",
+      broadGate: gate,
+      candidateSkill: null,
+      confidence: gate.confidence,
+      reason: "broad gate chose normal_msg; default normal message to Pi",
+      text: cleaned,
+      matchedTerms: gate.matchedTerms,
+      topCandidates: [],
+      timestamp: new Date().toISOString(),
+    };
+  }
+
+  if (gate.bucket === "direct_exec") {
+    return {
+      bucket: "direct_exec",
+      broadGate: gate,
+      candidateSkill: null,
+      confidence: gate.confidence,
+      reason: "broad gate matched direct_exec; execution is not implemented yet, so input extension will pass through unchanged",
+      text: cleaned,
+      matchedTerms: gate.matchedTerms,
+      topCandidates: [],
+      timestamp: new Date().toISOString(),
+    };
+  }
+
+  // pi_skill broad bucket: run the current catalog selector. This function is
+  // the planned replacement point for embeddings, followed later by optional CE reranking.
+  const candidates = selectSkillCandidate(cleaned, catalog);
   const best = candidates[0];
   const second = candidates[1];
   const margin = best && second ? best.score - second.score : best ? best.score : 0;
@@ -195,15 +281,16 @@ export function routeVoiceTranscript(text: string): VoiceRouteDecision {
 
   return {
     bucket: confident ? "pi_skill" : "normal_msg",
+    broadGate: gate,
     candidateSkill: confident && best ? best.skill : null,
-    confidence: best ? best.score : 0.05,
+    confidence: best ? best.score : gate.confidence,
     reason: confident
-      ? `matched known deterministic skill affordance above threshold (${PI_SKILL_THRESHOLD}) and margin (${PI_SKILL_MARGIN})`
+      ? `broad gate chose pi_skill; selector matched skill above threshold (${PI_SKILL_THRESHOLD}) and margin (${PI_SKILL_MARGIN})`
       : best
-        ? "no deterministic affordance was confident enough; default normal message to Pi"
-        : "no deterministic affordance matched; default normal message to Pi",
+        ? "broad gate chose pi_skill, but selector confidence/margin was too low; default normal message to Pi"
+        : "broad gate chose pi_skill, but selector found no candidate; default normal message to Pi",
     text: cleaned,
-    matchedTerms: best?.matchedTerms ?? [],
+    matchedTerms: best?.matchedTerms ?? gate.matchedTerms,
     topCandidates: candidates,
     timestamp: new Date().toISOString(),
   };

@@ -6,13 +6,15 @@ flowchart TD
     B --> C[pi.sendUserMessage cleaned text]
     C --> D0[Pig input event hook]
     D0 --> D[pig-classifier-intent-router]
-    D --> E0[Known deterministic affordance catalog]
-    E0 --> E[Rule scorer now / embeddings later]
-    E --> F{Confident bucket?}
-    F -- pi_skill --> G[Expand selected SKILL.md block]
+    D --> E0[Broad rules gate]
+    E0 --> E1{Broad bucket}
+    E1 -- normal_msg --> I[sendUserMessage transcript]
+    E1 -- direct_exec later --> J[Execute deterministic action/script]
+    E1 -- pi_skill --> E[Catalog skill selector: rules now / embeddings later]
+    E --> F{Confident skill?}
+    F -- yes --> G[Expand selected SKILL.md block]
+    F -- no --> I
     G --> H[sendUserMessage skill block + transcript]
-    F -- normal_msg --> I[sendUserMessage transcript]
-    F -. future direct_exec .-> J[Execute deterministic action/script]
     H --> K[Pig model follows loaded skill]
     I --> L[Pig/Gemma normal response]
     C -. JSONL .-> M[~/.pi/voice-dispatcher.jsonl]

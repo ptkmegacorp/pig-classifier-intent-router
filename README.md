@@ -10,6 +10,20 @@ Does this transcript confidently match one of our known deterministic affordance
 
 If yes, use the deterministic path. If no, send the transcript as a normal Pig/Gemma message.
 
+## Router shape
+
+The router is intentionally split into two layers:
+
+```text
+1. Broad rules gate
+   → pi_skill | direct_exec | normal_msg
+
+2. Catalog skill selector
+   → if broad bucket is pi_skill, choose the best matching skill
+```
+
+Current implementation is basic deterministic code: lowercase, tokenize, match weighted keywords/phrases, score candidates, and threshold. Planned expansion point: keep the broad bucket gate, then replace/improve the catalog selector with embeddings, and optionally add cross-encoder reranking later.
+
 ## Buckets
 
 ```text
