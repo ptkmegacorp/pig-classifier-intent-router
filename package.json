@@ -1,0 +1,33 @@
+{
+  "name": "pig-classifier-intent-router",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Pig extension package for deterministic-affordance intent routing from voice/audio transcripts into skill expansion or normal fallback",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pig",
+    "intent-router",
+    "classifier",
+    "voice",
+    "skills"
+  ],
+  "license": "MIT",
+  "author": "local Pig classifier intent router project",
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
+  },
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "types": "./src/index.ts"
+}
