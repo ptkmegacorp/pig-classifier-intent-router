@@ -1,8 +1,11 @@
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { basename, dirname, isAbsolute, join, normalize, resolve } from "node:path";
 import { homedir } from "node:os";
 
-export type VoiceRouteBucket = "pi_skill" | "direct_exec" | "normal_msg";
+export type VoiceRouteBucket = "deterministic" | "normal_msg";
+export type RouteExecutionMode = "pi_skill" | "direct_exec" | null;
 
 export interface SkillCatalogEntry {
   name: string;
@@ -19,19 +22,48 @@ export interface SkillScore {
   matchedTerms: string[];
 }
 
+export interface DirectExecAction {
+  id: string;
+  skill: string;
+  description: string;
+  script: string;
+  scriptPath: string;
+  baseDir: string;
+  directExec: boolean;
+  safety: string;
+  requiresConfirmation: boolean;
+  defaultArgs: string[];
+  keywords: string[];
+  exactPhrases: string[];
+}
+
+export interface DirectExecCandidate {
+  actionId: string;
+  skill: string;
+  script: string;
+  args: string[];
+  score: number;
+  matchedTerms: string[];
+  safety: string;
+}
+
 export interface BroadGateDecision {
   bucket: VoiceRouteBucket;
+  deterministicKind: "skill_or_action" | null;
   confidence: number;
   reason: string;
   matchedTerms: string[];
 }
 
 export interface VoiceRouteDecision {
-  /** Final runtime bucket after broad gate + selector/threshold. */
+  /** Final runtime bucket: either deterministic or normal fallback. */
   bucket: VoiceRouteBucket;
+  /** Execution mode inside the deterministic bucket. */
+  executionMode: RouteExecutionMode;
   /** First-stage rules gate. Later this can be a tiny classifier. */
   broadGate: BroadGateDecision;
   candidateSkill: string | null;
+  directExec: DirectExecCandidate | null;
   confidence: number;
   reason: string;
   text: string;
@@ -49,17 +81,13 @@ export interface ResolvedSkill {
 
 const PI_SKILL_THRESHOLD = Number(process.env.PI_VOICE_SKILL_THRESHOLD ?? "0.5");
 const PI_SKILL_MARGIN = Number(process.env.PI_VOICE_SKILL_MARGIN ?? "0.12");
+const DIRECT_EXEC_THRESHOLD = Number(process.env.PI_VOICE_DIRECT_EXEC_THRESHOLD ?? "0.85");
+const execFileAsync = promisify(execFile);
 
 const STOP_WORDS = new Set([
   "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "in", "is", "it", "of", "on", "or", "the", "to", "use", "user", "when", "with",
   "asks", "ask", "agent", "ai", "pig", "pi", "current", "latest", "what", "this", "that", "there", "here",
 ]);
-
-const DIRECT_EXEC_TERMS = [
-  "focus left", "focus right", "focus up", "focus down",
-  "move window", "move left", "move right", "move up", "move down",
-  "resize", "split", "workspace", "switch workspace", "pane", "container",
-];
 
 const SKILL_ALIASES: Record<string, string[]> = {
   weather: [
@@ -124,6 +152,22 @@ function parseFrontmatter(raw: string): { name?: string; description?: string; b
   return out;
 }
 
+function safeScriptPath(baseDir: string, script: string): string | null {
+  if (isAbsolute(script) || script.includes("..")) return null;
+  const full = resolve(baseDir, script);
+  const scriptsDir = resolve(baseDir, "scripts");
+  if (!full.startsWith(`${scriptsDir}/`)) return null;
+  if (!existsSync(full)) return null;
+  return full;
+}
+
+function isDirectExecSafe(action: any): boolean {
+  return action?.directExec === true
+    && action?.requiresConfirmation === false
+    && typeof action?.safety === "string"
+    && action.safety.startsWith("read_only");
+}
+
 export function loadSkillCatalog(): SkillCatalogEntry[] {
   const byName = new Map<string, SkillCatalogEntry>();
 
@@ -155,31 +199,66 @@ export function loadSkillCatalog(): SkillCatalogEntry[] {
   return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
 
-function broadGate(text: string, catalog: SkillCatalogEntry[]): BroadGateDecision {
-  const piSkillTerms = unique(catalog.flatMap((skill) => skill.keywords));
-  const piSkillMatches = piSkillTerms.filter((term) => term.includes(" ") ? phraseMatches(text, term) : new Set(tokenize(text)).has(term));
-  const directMatches = DIRECT_EXEC_TERMS.filter((term) => phraseMatches(text, term));
-
-  if (directMatches.length > 0 && piSkillMatches.length === 0) {
-    return {
-      bucket: "direct_exec",
-      confidence: Math.min(0.99, 0.45 + directMatches.length * 0.15),
-      reason: "matched direct-exec control phrase; direct execution is reserved for future use",
-      matchedTerms: unique(directMatches),
-    };
+export function loadDirectExecActions(): DirectExecAction[] {
+  const actions: DirectExecAction[] = [];
+  for (const root of skillRoots()) {
+    if (!existsSync(root)) continue;
+    for (const entry of readdirSync(root)) {
+      const skillDir = join(root, entry);
+      const metadataPath = join(skillDir, "direct-exec.json");
+      try {
+        if (!statSync(skillDir).isDirectory() || !existsSync(metadataPath)) continue;
+        const raw = JSON.parse(readFileSync(metadataPath, "utf-8"));
+        const list = Array.isArray(raw.actions) ? raw.actions : [];
+        for (const action of list) {
+          if (!isDirectExecSafe(action)) continue;
+          if (typeof action.id !== "string" || typeof action.script !== "string") continue;
+          const scriptPath = safeScriptPath(skillDir, action.script);
+          if (!scriptPath) continue;
+          actions.push({
+            id: action.id,
+            skill: entry,
+            description: typeof action.description === "string" ? action.description : "",
+            script: normalize(action.script),
+            scriptPath,
+            baseDir: skillDir,
+            directExec: true,
+            safety: action.safety,
+            requiresConfirmation: false,
+            defaultArgs: Array.isArray(action.defaultArgs) ? action.defaultArgs.map(String) : [],
+            keywords: Array.isArray(action.keywords) ? action.keywords.map(String) : [],
+            exactPhrases: Array.isArray(action.exactPhrases) ? action.exactPhrases.map(String) : [],
+          });
+        }
+      } catch {
+        // Ignore malformed direct-exec metadata; skill path remains available.
+      }
+    }
   }
+  return actions.sort((a, b) => a.id.localeCompare(b.id));
+}
 
-  if (piSkillMatches.length > 0) {
+function broadGate(text: string, catalog: SkillCatalogEntry[], actions: DirectExecAction[]): BroadGateDecision {
+  const terms = unique([
+    ...catalog.flatMap((skill) => skill.keywords),
+    ...actions.flatMap((action) => [...action.keywords, ...action.exactPhrases]),
+  ]);
+  const tokens = new Set(tokenize(text));
+  const matches = terms.filter((term) => term.includes(" ") ? phraseMatches(text, term) : tokens.has(term.toLowerCase()));
+
+  if (matches.length > 0) {
     return {
-      bucket: "pi_skill",
-      confidence: Math.min(0.99, 0.35 + piSkillMatches.length * 0.12),
-      reason: "matched known skill affordance term(s); run catalog selector",
-      matchedTerms: unique(piSkillMatches),
+      bucket: "deterministic",
+      deterministicKind: "skill_or_action",
+      confidence: Math.min(0.99, 0.35 + matches.length * 0.12),
+      reason: "matched known deterministic affordance term(s); run selector and execution gate",
+      matchedTerms: unique(matches),
     };
   }
 
   return {
     bucket: "normal_msg",
+    deterministicKind: null,
     confidence: 0.05,
     reason: "no broad deterministic affordance matched",
     matchedTerms: [],
@@ -193,6 +272,46 @@ function selectSkillCandidate(text: string, catalog: SkillCatalogEntry[]): Skill
     .filter((candidate) => candidate.score > 0)
     .sort((a, b) => b.score - a.score)
     .slice(0, 5);
+}
+
+function scoreDirectExecAction(text: string, action: DirectExecAction, selectedSkill: string | null): DirectExecCandidate {
+  const tokens = new Set(tokenize(text));
+  const matchedTerms: string[] = [];
+  let score = 0;
+
+  if (selectedSkill && selectedSkill === action.skill) score += 0.18;
+
+  for (const phrase of action.exactPhrases) {
+    if (!phraseMatches(text, phrase)) continue;
+    matchedTerms.push(phrase);
+    score += 0.55;
+  }
+
+  for (const keyword of action.keywords) {
+    const matched = keyword.includes(" ") ? phraseMatches(text, keyword) : tokens.has(keyword.toLowerCase());
+    if (!matched) continue;
+    matchedTerms.push(keyword);
+    score += keyword.includes(" ") ? 0.25 : 0.08;
+  }
+
+  return {
+    actionId: action.id,
+    skill: action.skill,
+    script: action.script,
+    args: action.defaultArgs,
+    score: Math.min(0.99, Number(score.toFixed(2))),
+    matchedTerms: unique(matchedTerms),
+    safety: action.safety,
+  };
+}
+
+function selectDirectExecCandidate(text: string, actions: DirectExecAction[], selectedSkill: string | null): DirectExecCandidate | null {
+  const best = actions
+    .map((action) => scoreDirectExecAction(text, action, selectedSkill))
+    .filter((candidate) => candidate.score > 0)
+    .sort((a, b) => b.score - a.score)[0];
+  if (!best || best.score < DIRECT_EXEC_THRESHOLD) return null;
+  return best;
 }
 
 function scoreSkill(text: string, skill: SkillCatalogEntry): SkillScore {
@@ -234,20 +353,26 @@ function scoreSkill(text: string, skill: SkillCatalogEntry): SkillScore {
  * back to Gemma/Pi as a normal message.
  *
  * Buckets:
- * - pi_skill: deterministic selection of a Pi/Pig skill context, then pass the transcript to it.
- * - direct_exec: reserved for future deterministic script/action execution; not emitted yet.
+ * - deterministic: known affordance; executionMode chooses direct_exec or pi_skill.
  * - normal_msg: safe fallback; send the transcript to Pi normally.
+ *
+ * Execution modes:
+ * - direct_exec: exact, explicitly opted-in read-only script path.
+ * - pi_skill: contextual skill expansion path.
  */
 export function routeVoiceTranscript(text: string): VoiceRouteDecision {
   const cleaned = text.trim();
   const catalog = loadSkillCatalog();
-  const gate = broadGate(cleaned, catalog);
+  const directActions = loadDirectExecActions();
+  const gate = broadGate(cleaned, catalog, directActions);
 
   if (gate.bucket === "normal_msg") {
     return {
       bucket: "normal_msg",
+      executionMode: null,
       broadGate: gate,
       candidateSkill: null,
+      directExec: null,
       confidence: gate.confidence,
       reason: "broad gate chose normal_msg; default normal message to Pi",
       text: cleaned,
@@ -257,38 +382,46 @@ export function routeVoiceTranscript(text: string): VoiceRouteDecision {
     };
   }
 
-  if (gate.bucket === "direct_exec") {
-    return {
-      bucket: "direct_exec",
-      broadGate: gate,
-      candidateSkill: null,
-      confidence: gate.confidence,
-      reason: "broad gate matched direct_exec; execution is not implemented yet, so input extension will pass through unchanged",
-      text: cleaned,
-      matchedTerms: gate.matchedTerms,
-      topCandidates: [],
-      timestamp: new Date().toISOString(),
-    };
-  }
-
-  // pi_skill broad bucket: run the current catalog selector. This function is
-  // the planned replacement point for embeddings, followed later by optional CE reranking.
+  // Deterministic broad bucket: first select the affordance/skill. This selector
+  // is the planned replacement point for embeddings, followed later by optional CE reranking.
   const candidates = selectSkillCandidate(cleaned, catalog);
   const best = candidates[0];
   const second = candidates[1];
   const margin = best && second ? best.score - second.score : best ? best.score : 0;
-  const confident = Boolean(best && best.score >= PI_SKILL_THRESHOLD && (!second || margin >= PI_SKILL_MARGIN));
+  const skillConfident = Boolean(best && best.score >= PI_SKILL_THRESHOLD && (!second || margin >= PI_SKILL_MARGIN));
+  const selectedSkill = skillConfident && best ? best.skill : null;
+
+  // Third node: if metadata says a script is safe and the request is exact enough,
+  // route as direct_exec. Otherwise deterministic requests use the contextual skill path.
+  const directExec = selectDirectExecCandidate(cleaned, directActions, selectedSkill);
+  if (directExec) {
+    return {
+      bucket: "deterministic",
+      executionMode: "direct_exec",
+      broadGate: gate,
+      candidateSkill: directExec.skill,
+      directExec,
+      confidence: directExec.score,
+      reason: `broad gate chose deterministic; execution gate selected direct_exec above threshold (${DIRECT_EXEC_THRESHOLD})`,
+      text: cleaned,
+      matchedTerms: directExec.matchedTerms,
+      topCandidates: candidates,
+      timestamp: new Date().toISOString(),
+    };
+  }
 
   return {
-    bucket: confident ? "pi_skill" : "normal_msg",
+    bucket: skillConfident ? "deterministic" : "normal_msg",
+    executionMode: skillConfident ? "pi_skill" : null,
     broadGate: gate,
-    candidateSkill: confident && best ? best.skill : null,
+    candidateSkill: selectedSkill,
+    directExec: null,
     confidence: best ? best.score : gate.confidence,
-    reason: confident
-      ? `broad gate chose pi_skill; selector matched skill above threshold (${PI_SKILL_THRESHOLD}) and margin (${PI_SKILL_MARGIN})`
+    reason: skillConfident
+      ? `broad gate chose deterministic; selector matched skill above threshold (${PI_SKILL_THRESHOLD}) and margin (${PI_SKILL_MARGIN}); execution gate chose contextual pi_skill path`
       : best
-        ? "broad gate chose pi_skill, but selector confidence/margin was too low; default normal message to Pi"
-        : "broad gate chose pi_skill, but selector found no candidate; default normal message to Pi",
+        ? "broad gate chose deterministic, but selector confidence/margin was too low; default normal message to Pi"
+        : "broad gate chose deterministic, but selector found no candidate; default normal message to Pi",
     text: cleaned,
     matchedTerms: best?.matchedTerms ?? gate.matchedTerms,
     topCandidates: candidates,
@@ -331,4 +464,29 @@ export function buildSkillUserMessage(skill: ResolvedSkill, userText: string): s
   const safeName = basename(skill.baseDir);
   const skillBlock = `<skill name="${safeName}" location="${skill.filePath}">\nReferences are relative to ${skill.baseDir}.\n\n${skill.body}\n</skill>`;
   return `${skillBlock}\n\n${userText}`;
+}
+
+export async function runDirectExecAction(candidate: DirectExecCandidate, timeoutMs = 30000): Promise<{ stdout: string; stderr: string }> {
+  const action = loadDirectExecActions().find((item) => item.id === candidate.actionId && item.skill === candidate.skill);
+  if (!action) throw new Error(`Direct-exec action not found or not eligible: ${candidate.actionId}`);
+  const { stdout, stderr } = await execFileAsync(action.scriptPath, action.defaultArgs, {
+    cwd: action.baseDir,
+    timeout: timeoutMs,
+    maxBuffer: 1024 * 1024,
+  });
+  return { stdout, stderr };
+}
+
+export function buildDirectExecResultMessage(decision: VoiceRouteDecision, result: { stdout: string; stderr: string }): string {
+  return [
+    `Direct execution result for: ${decision.text}`,
+    `Action: ${decision.directExec?.actionId ?? "unknown"}`,
+    `Safety: ${decision.directExec?.safety ?? "unknown"}`,
+    "",
+    "Use the script output below to answer the user's original request concisely. Do not invent data not present in the output.",
+    "",
+    "SCRIPT_STDOUT:",
+    result.stdout.trim() || "(empty)",
+    result.stderr.trim() ? `\nSCRIPT_STDERR:\n${result.stderr.trim()}` : "",
+  ].filter(Boolean).join("\n");
 }

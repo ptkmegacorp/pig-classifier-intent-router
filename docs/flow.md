@@ -9,13 +9,15 @@ flowchart TD
     D --> E0[Broad rules gate]
     E0 --> E1{Broad bucket}
     E1 -- normal_msg --> I[sendUserMessage transcript]
-    E1 -- direct_exec later --> J[Execute deterministic action/script]
-    E1 -- pi_skill --> E[Catalog skill selector: rules now / embeddings later]
-    E --> F{Confident skill?}
-    F -- yes --> G[Expand selected SKILL.md block]
-    F -- no --> I
+    E1 -- deterministic --> E[Deterministic selector: rules now / embeddings later]
+    E --> X{Execution gate}
+    X -- exact + safe metadata --> J[Execute opted-in script]
+    X -- contextual skill --> G[Expand selected SKILL.md block]
+    X -- not confident --> I
     G --> H[sendUserMessage skill block + transcript]
     H --> K[Pig model follows loaded skill]
+    J --> R[Transform to compact script-result prompt]
+    R --> L
     I --> L[Pig/Gemma normal response]
     C -. JSONL .-> M[~/.pi/voice-dispatcher.jsonl]
     M --> N[intent-router-error-log skill]

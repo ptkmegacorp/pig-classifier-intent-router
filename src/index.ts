@@ -1,20 +1,24 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import {
+  buildDirectExecResultMessage,
   buildSkillUserMessage,
   getVoiceDispatchLogPath,
   loadSkillCatalog,
   logVoiceRouteDecision,
   resolveSkill,
   routeVoiceTranscript,
+  runDirectExecAction,
 } from "./router.js";
 
 export {
+  buildDirectExecResultMessage,
   buildSkillUserMessage,
   getVoiceDispatchLogPath,
   loadSkillCatalog,
   logVoiceRouteDecision,
   resolveSkill,
   routeVoiceTranscript,
+  runDirectExecAction,
 };
 
 export default function pigClassifierIntentRouter(pi: ExtensionAPI) {
@@ -29,7 +33,7 @@ export default function pigClassifierIntentRouter(pi: ExtensionAPI) {
     logVoiceRouteDecision(decision);
 
     let messageText = decision.text;
-    if (decision.bucket === "pi_skill" && decision.candidateSkill) {
+    if (decision.executionMode === "pi_skill" && decision.candidateSkill) {
       const skill = resolveSkill(decision.candidateSkill);
       if (skill) {
         messageText = buildSkillUserMessage(skill, decision.text);
@@ -48,7 +52,19 @@ export default function pigClassifierIntentRouter(pi: ExtensionAPI) {
     }
 
     const { messageText, decision } = routeTextForPi(text);
-    if (decision.bucket !== "pi_skill") {
+
+    if (decision.executionMode === "direct_exec" && decision.directExec) {
+      try {
+        const result = await runDirectExecAction(decision.directExec);
+        return { action: "transform" as const, text: buildDirectExecResultMessage(decision, result), images: event.images };
+      } catch (err) {
+        // Fail safe: do not block the user. Fall back to normal Pig/Gemma handling.
+        console.warn(`[pig-classifier-intent-router] direct_exec failed: ${err instanceof Error ? err.message : String(err)}`);
+        return { action: "continue" as const };
+      }
+    }
+
+    if (decision.executionMode !== "pi_skill") {
       return { action: "continue" as const };
     }
 

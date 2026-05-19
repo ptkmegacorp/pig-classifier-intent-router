@@ -12,24 +12,30 @@ If yes, use the deterministic path. If no, send the transcript as a normal Pig/G
 
 ## Router shape
 
-The router is intentionally split into two layers:
+The router is intentionally split into three nodes:
 
 ```text
 1. Broad rules gate
-   → pi_skill | direct_exec | normal_msg
+   → deterministic | normal_msg
 
-2. Catalog skill selector
-   → if broad bucket is pi_skill, choose the best matching skill
+2. Deterministic selector
+   → choose the best matching skill/affordance
+
+3. Execution gate
+   → direct_exec if metadata says a script is safe and the request is exact enough
+   → otherwise pi_skill contextual path
 ```
 
-Current implementation is basic deterministic code: lowercase, tokenize, match weighted keywords/phrases, score candidates, and threshold. Planned expansion point: keep the broad bucket gate, then replace/improve the catalog selector with embeddings, and optionally add cross-encoder reranking later.
+Current implementation is basic deterministic code: lowercase, tokenize, match weighted keywords/phrases, score candidates, and threshold. Planned expansion point: keep the broad bucket gate, then replace/improve the deterministic selector with embeddings, and optionally add cross-encoder reranking later.
 
 ## Buckets
 
 ```text
-pi_skill      deterministically expand/load a Pig skill, then pass the transcript to it
-direct_exec   future deterministic script/action execution; not active yet
-normal_msg    safe fallback to normal Pig/Gemma message
+deterministic  known affordance; then executionMode chooses pi_skill or direct_exec
+normal_msg     safe fallback to normal Pig/Gemma message
+
+executionMode=pi_skill     expand/load a Pig skill, then pass the transcript to it
+executionMode=direct_exec  run an explicitly opted-in read-only script, then pass compact result to Gemma
 ```
 
 ## Current catalog
