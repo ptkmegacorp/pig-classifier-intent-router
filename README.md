@@ -69,7 +69,7 @@ pi-voice-vad-gemma
 → pi.sendUserMessage(cleaned text)
 → Pig input event
 → pig-classifier-intent-router
-→ pi_skill expansion or normal_msg fallback
+→ deterministic direct_exec or pi_skill transform, else normal_msg fallback
 → Pig/Gemma
 ```
 
@@ -79,6 +79,8 @@ The router also exports functions for tests/diagnostics:
 routeVoiceTranscript(text)
 resolveSkill(name)
 buildSkillUserMessage(skill, text)
+runDirectExecAction(candidate)
+buildDirectExecResultMessage(decision, result)
 logVoiceRouteDecision(decision)
 ```
 
