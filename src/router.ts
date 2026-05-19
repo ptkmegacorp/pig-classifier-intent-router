@@ -161,11 +161,17 @@ function safeScriptPath(baseDir: string, script: string): string | null {
   return full;
 }
 
+const DIRECT_EXEC_ALLOWED_SAFETY = new Set([
+  "read_only_network",
+  "read_only_local",
+  "local_capture",
+]);
+
 function isDirectExecSafe(action: any): boolean {
   return action?.directExec === true
     && action?.requiresConfirmation === false
     && typeof action?.safety === "string"
-    && action.safety.startsWith("read_only");
+    && DIRECT_EXEC_ALLOWED_SAFETY.has(action.safety);
 }
 
 export function loadSkillCatalog(): SkillCatalogEntry[] {
@@ -284,7 +290,7 @@ function scoreDirectExecAction(text: string, action: DirectExecAction, selectedS
   for (const phrase of action.exactPhrases) {
     if (!phraseMatches(text, phrase)) continue;
     matchedTerms.push(phrase);
-    score += 0.55;
+    score += 0.65;
   }
 
   for (const keyword of action.keywords) {

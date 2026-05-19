@@ -35,7 +35,9 @@ deterministic  known affordance; then executionMode chooses pi_skill or direct_e
 normal_msg     safe fallback to normal Pig/Gemma message
 
 executionMode=pi_skill     expand/load a Pig skill, then pass the transcript to it
-executionMode=direct_exec  run an explicitly opted-in read-only script, then pass compact result to Gemma
+executionMode=direct_exec  run an explicitly opted-in safe script, then pass compact result to Gemma
+
+Current accepted metadata safety classes: `read_only_network`, `read_only_local`, and `local_capture`.
 ```
 
 ## Current catalog
