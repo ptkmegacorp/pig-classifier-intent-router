@@ -1,25 +1,63 @@
+import { readFileSync } from "node:fs";
+import { extname } from "node:path";
+import type { ImageContent } from "@mariozechner/pi-ai";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import {
   buildDirectExecResultMessage,
   buildSkillUserMessage,
+  buildVisualInspectionMessage,
+  findDirectExecImagePath,
   getVoiceDispatchLogPath,
   loadSkillCatalog,
   logVoiceRouteDecision,
   resolveSkill,
   routeVoiceTranscript,
   runDirectExecAction,
+  shouldAttachDirectExecImage,
 } from "./router.js";
 
 export {
   buildDirectExecResultMessage,
   buildSkillUserMessage,
+  buildVisualInspectionMessage,
+  findDirectExecImagePath,
   getVoiceDispatchLogPath,
   loadSkillCatalog,
   logVoiceRouteDecision,
   resolveSkill,
   routeVoiceTranscript,
   runDirectExecAction,
+  shouldAttachDirectExecImage,
 };
+
+
+function mimeTypeForImagePath(path: string): string | null {
+  switch (extname(path).toLowerCase()) {
+    case ".png":
+      return "image/png";
+    case ".jpg":
+    case ".jpeg":
+      return "image/jpeg";
+    case ".webp":
+      return "image/webp";
+    default:
+      return null;
+  }
+}
+
+function readImageAttachment(path: string): ImageContent | null {
+  const mimeType = mimeTypeForImagePath(path);
+  if (!mimeType) return null;
+  try {
+    return { type: "image", mimeType, data: readFileSync(path).toString("base64") };
+  } catch {
+    return null;
+  }
+}
+
+function appendImage(images: ImageContent[] | undefined, image: ImageContent): ImageContent[] {
+  return [...(images ?? []), image];
+}
 
 export default function pigClassifierIntentRouter(pi: ExtensionAPI) {
   function notify(message: string, type: "info" | "success" | "warning" | "error" = "info"): void {
@@ -56,6 +94,15 @@ export default function pigClassifierIntentRouter(pi: ExtensionAPI) {
     if (decision.executionMode === "direct_exec" && decision.directExec) {
       try {
         const result = await runDirectExecAction(decision.directExec);
+        const imagePath = shouldAttachDirectExecImage(decision) ? findDirectExecImagePath(decision, result) : null;
+        const image = imagePath ? readImageAttachment(imagePath) : null;
+        if (image && imagePath) {
+          return {
+            action: "transform" as const,
+            text: buildVisualInspectionMessage(decision, imagePath, result),
+            images: appendImage(event.images, image),
+          };
+        }
         return { action: "transform" as const, text: buildDirectExecResultMessage(decision, result), images: event.images };
       } catch (err) {
         // Fail safe: do not block the user. Fall back to normal Pig/Gemma handling.

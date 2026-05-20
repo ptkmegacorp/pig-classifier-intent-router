@@ -72,6 +72,11 @@ export interface VoiceRouteDecision {
   timestamp: string;
 }
 
+export interface DirectExecResult {
+  stdout: string;
+  stderr: string;
+}
+
 export interface ResolvedSkill {
   name: string;
   filePath: string;
@@ -320,6 +325,10 @@ function selectDirectExecCandidate(text: string, actions: DirectExecAction[], se
   return best;
 }
 
+function isVisualInspectRequest(text: string): boolean {
+  return /\b(what'?s|what is|describe|inspect|read|look at|see|visible|on screen|in the screenshot|in the photo|in the picture|contents?)\b/i.test(text);
+}
+
 function scoreSkill(text: string, skill: SkillCatalogEntry): SkillScore {
   const textTokens = new Set(tokenize(text));
   const matchedTerms: string[] = [];
@@ -348,6 +357,34 @@ function scoreSkill(text: string, skill: SkillCatalogEntry): SkillScore {
     skill: skill.name,
     score: Math.min(0.99, Number(score.toFixed(2))),
     matchedTerms: unique(matchedTerms),
+  };
+}
+
+function findVisualInspectDirectExec(
+  text: string,
+  actions: DirectExecAction[],
+  selectedSkill: string | null,
+): DirectExecCandidate | null {
+  if (!selectedSkill || !isVisualInspectRequest(text)) return null;
+  const actionId =
+    selectedSkill === "take-screenshot"
+      ? "take-screenshot.capture"
+      : selectedSkill === "take-photo"
+        ? "take-photo.capture"
+        : null;
+  if (!actionId) return null;
+
+  const action = actions.find((item) => item.id === actionId && item.skill === selectedSkill);
+  if (!action) return null;
+
+  return {
+    actionId: action.id,
+    skill: action.skill,
+    script: action.script,
+    args: action.defaultArgs,
+    score: Math.max(DIRECT_EXEC_THRESHOLD, 0.9),
+    matchedTerms: unique(["visual-inspect", ...action.keywords.filter((keyword) => phraseMatches(text, keyword))]),
+    safety: action.safety,
   };
 }
 
@@ -396,10 +433,14 @@ export function routeVoiceTranscript(text: string): VoiceRouteDecision {
   const margin = best && second ? best.score - second.score : best ? best.score : 0;
   const skillConfident = Boolean(best && best.score >= PI_SKILL_THRESHOLD && (!second || margin >= PI_SKILL_MARGIN));
   const selectedSkill = skillConfident && best ? best.skill : null;
+  const visualInspectSkill =
+    best && isVisualInspectRequest(cleaned) && (best.skill === "take-screenshot" || best.skill === "take-photo") ? best.skill : null;
 
   // Third node: if metadata says a script is safe and the request is exact enough,
   // route as direct_exec. Otherwise deterministic requests use the contextual skill path.
-  const directExec = selectDirectExecCandidate(cleaned, directActions, selectedSkill);
+  const directExecSkill = selectedSkill ?? visualInspectSkill;
+  const visualInspectDirectExec = findVisualInspectDirectExec(cleaned, directActions, directExecSkill);
+  const directExec = visualInspectDirectExec ?? selectDirectExecCandidate(cleaned, directActions, selectedSkill);
   if (directExec) {
     return {
       bucket: "deterministic",
@@ -472,7 +513,7 @@ export function buildSkillUserMessage(skill: ResolvedSkill, userText: string): s
   return `${skillBlock}\n\n${userText}`;
 }
 
-export async function runDirectExecAction(candidate: DirectExecCandidate, timeoutMs = 30000): Promise<{ stdout: string; stderr: string }> {
+export async function runDirectExecAction(candidate: DirectExecCandidate, timeoutMs = 30000): Promise<DirectExecResult> {
   const action = loadDirectExecActions().find((item) => item.id === candidate.actionId && item.skill === candidate.skill);
   if (!action) throw new Error(`Direct-exec action not found or not eligible: ${candidate.actionId}`);
   const { stdout, stderr } = await execFileAsync(action.scriptPath, action.defaultArgs, {
@@ -483,7 +524,32 @@ export async function runDirectExecAction(candidate: DirectExecCandidate, timeou
   return { stdout, stderr };
 }
 
-export function buildDirectExecResultMessage(decision: VoiceRouteDecision, result: { stdout: string; stderr: string }): string {
+export function findDirectExecImagePath(decision: VoiceRouteDecision, result: DirectExecResult): string | null {
+  const key = decision.directExec?.skill === "take-photo" ? "PHOTO" : "SCREENSHOT";
+  const match = result.stdout.match(new RegExp(`^${key}=(.+)$`, "m"));
+  return match?.[1]?.trim() || null;
+}
+
+export function shouldAttachDirectExecImage(decision: VoiceRouteDecision): boolean {
+  if (!decision.directExec) return false;
+  if (decision.directExec.skill !== "take-screenshot" && decision.directExec.skill !== "take-photo") return false;
+  return decision.directExec.matchedTerms.includes("visual-inspect") || isVisualInspectRequest(decision.text);
+}
+
+export function buildVisualInspectionMessage(decision: VoiceRouteDecision, imagePath: string, result: DirectExecResult): string {
+  return [
+    `User request: ${decision.text}`,
+    `Attached image path: ${imagePath}`,
+    "",
+    "Answer the user's visual question from the attached image. Do not say you need to call read or open the file; the image is already attached. If the answer is not visible, say that briefly.",
+    "",
+    "CAPTURE_STDOUT:",
+    result.stdout.trim() || "(empty)",
+    result.stderr.trim() ? `\nCAPTURE_STDERR:\n${result.stderr.trim()}` : "",
+  ].filter(Boolean).join("\n");
+}
+
+export function buildDirectExecResultMessage(decision: VoiceRouteDecision, result: DirectExecResult): string {
   return [
     `Direct execution result for: ${decision.text}`,
     `Action: ${decision.directExec?.actionId ?? "unknown"}`,
