@@ -15,7 +15,7 @@ If yes, use the deterministic path. If no, send the transcript as a normal Pig/G
 The router is intentionally split into three nodes:
 
 ```text
-1. Broad rules gate
+1. Broad family gate
    → deterministic | normal_msg
 
 2. Metadata/BM25 selector
@@ -26,7 +26,7 @@ The router is intentionally split into three nodes:
    → otherwise pi_skill contextual path
 ```
 
-Current implementation is staged deterministic code: Pi discovers skills, the router reads adjacent `routing.json`/`direct-exec.json` metadata, applies broad family gates, scores eligible skill/intent metadata with lightweight BM25, checks required context, and thresholds direct execution. Planned refactor: move the selector toward a generic extractor/frame pattern for deterministic computer-use domains.
+Current implementation is staged deterministic code: Pi discovers skills, the router reads adjacent `routing.json`/`direct-exec.json` metadata, applies broad family gates, scores eligible skill/intent metadata with lightweight BM25, checks required context, and thresholds direct execution. Planned refactor: move the selector toward a typed command compiler for deterministic computer-use domains.
 
 ## Buckets
 
@@ -67,7 +67,7 @@ Current obvious Pig skill affordances include:
 Refactor guide:
 
 ```text
-docs/refactor-to-extractor-pattern.md
+docs/refactor-to-command-compiler.md
 ```
 
 ## Integration with voice/audio input
