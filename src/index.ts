@@ -1,14 +1,22 @@
-import { readFileSync } from "node:fs";
-import { extname } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { extname, join } from "node:path";
 import type { ImageContent } from "@mariozechner/pi-ai";
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, SlashCommandInfo } from "@mariozechner/pi-coding-agent";
+import { compileVoiceCommand, DEFAULT_EXTRACTOR_STACK } from "./compiler/compiler.js";
+import { defaultCommandExtractor } from "./compiler/defaultExtractor.js";
+import { metadataBm25Extractor } from "./compiler/metadataBm25Extractor.js";
+import { embeddingExtractor } from "./compiler/embeddingExtractor.js";
+import { runExtractorStack } from "./compiler/extractors.js";
+import { getLoweringRules } from "./compiler/lower.js";
+import { getPigCommandState } from "./compiler/state.js";
 import {
   buildDirectExecResultMessage,
   buildSkillUserMessage,
   buildVisualInspectionMessage,
   findDirectExecImagePath,
   getVoiceDispatchLogPath,
-  loadSkillCatalog,
+  loadRouteResourcesFromCommands,
   logVoiceRouteDecision,
   resolveSkill,
   routeVoiceTranscript,
@@ -17,12 +25,20 @@ import {
 } from "./router.js";
 
 export {
+  compileVoiceCommand,
+  DEFAULT_EXTRACTOR_STACK,
+  defaultCommandExtractor,
+  metadataBm25Extractor,
+  embeddingExtractor,
+  getLoweringRules,
+  getPigCommandState,
+  runExtractorStack,
   buildDirectExecResultMessage,
   buildSkillUserMessage,
   buildVisualInspectionMessage,
   findDirectExecImagePath,
   getVoiceDispatchLogPath,
-  loadSkillCatalog,
+  loadRouteResourcesFromCommands,
   logVoiceRouteDecision,
   resolveSkill,
   routeVoiceTranscript,
@@ -59,6 +75,13 @@ function appendImage(images: ImageContent[] | undefined, image: ImageContent): I
   return [...(images ?? []), image];
 }
 
+function existingSkillPaths(cwd: string): string[] {
+  return [
+    join(homedir(), ".pig", "agent", "skills"),
+    join(cwd, ".pig", "skills"),
+  ].filter((path) => existsSync(path));
+}
+
 export default function pigClassifierIntentRouter(pi: ExtensionAPI) {
   function notify(message: string, type: "info" | "success" | "warning" | "error" = "info"): void {
     // Command context has a better notify path; this is only for startup.
@@ -66,19 +89,28 @@ export default function pigClassifierIntentRouter(pi: ExtensionAPI) {
     console.log(`[pig-classifier-intent-router] ${message}`);
   }
 
-  function routeTextForPi(text: string): { messageText: string; decision: ReturnType<typeof routeVoiceTranscript> } {
-    const decision = routeVoiceTranscript(text);
+  function routeResources() {
+    return loadRouteResourcesFromCommands(pi.getCommands().filter((command): command is SlashCommandInfo & { source: "skill" } => command.source === "skill"));
+  }
+
+  async function routeTextForPi(text: string): Promise<{ messageText: string; decision: Awaited<ReturnType<typeof routeVoiceTranscript>>; resources: ReturnType<typeof routeResources> }> {
+    const resources = routeResources();
+    const decision = await routeVoiceTranscript(text, resources);
     logVoiceRouteDecision(decision);
 
     let messageText = decision.text;
     if (decision.executionMode === "pi_skill" && decision.candidateSkill) {
-      const skill = resolveSkill(decision.candidateSkill);
+      const skill = resolveSkill(decision.candidateSkill, resources.catalog);
       if (skill) {
         messageText = buildSkillUserMessage(skill, decision.text);
       }
     }
-    return { messageText, decision };
+    return { messageText, decision, resources };
   }
+
+  pi.on("resources_discover", (event) => ({
+    skillPaths: existingSkillPaths(event.cwd),
+  }));
 
   pi.on("input", async (event) => {
     const text = event.text.trim();
@@ -89,11 +121,11 @@ export default function pigClassifierIntentRouter(pi: ExtensionAPI) {
       return { action: "continue" as const };
     }
 
-    const { messageText, decision } = routeTextForPi(text);
+    const { messageText, decision, resources } = await routeTextForPi(text);
 
     if (decision.executionMode === "direct_exec" && decision.directExec) {
       try {
-        const result = await runDirectExecAction(decision.directExec);
+        const result = await runDirectExecAction(decision.directExec, 30000, resources.actions);
         const imagePath = shouldAttachDirectExecImage(decision) ? findDirectExecImagePath(decision, result) : null;
         const image = imagePath ? readImageAttachment(imagePath) : null;
         if (image && imagePath) {
@@ -128,7 +160,8 @@ export default function pigClassifierIntentRouter(pi: ExtensionAPI) {
         ctx.ui.notify("Usage: /intent-route <text>", "info");
         return;
       }
-      const decision = routeVoiceTranscript(text);
+      const resources = routeResources();
+      const decision = await routeVoiceTranscript(text, resources);
       try {
         logVoiceRouteDecision(decision);
       } catch {
@@ -146,7 +179,7 @@ export default function pigClassifierIntentRouter(pi: ExtensionAPI) {
         ctx.ui.notify("Usage: /intent-send <text>", "info");
         return;
       }
-      const { messageText, decision } = routeTextForPi(text);
+      const { messageText, decision } = await routeTextForPi(text);
       ctx.ui.notify(`intent bucket=${decision.bucket} skill=${decision.candidateSkill ?? "none"} confidence=${decision.confidence}`, "info");
       if (ctx.isIdle()) pi.sendUserMessage(messageText);
       else pi.sendUserMessage(messageText, { deliverAs: "followUp" });
@@ -154,7 +187,7 @@ export default function pigClassifierIntentRouter(pi: ExtensionAPI) {
   });
 
   pi.on("session_start", async (_event, ctx) => {
-    const skills = loadSkillCatalog().map((s) => s.name).join(", ") || "none";
+    const skills = routeResources().catalog.map((s) => s.name).join(", ") || "none";
     ctx.ui.notify(
       `🐷 classifier intent router ready. Catalog: ${skills}. Log: ${getVoiceDispatchLogPath()}. Related skill: intent-router-error-log.`,
       "info",

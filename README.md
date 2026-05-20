@@ -5,28 +5,31 @@ Pig extension package for routing voice/audio transcripts and other Pig input th
 Core question:
 
 ```text
-Does this transcript confidently match one of our known deterministic affordances?
+What typed command, if any, is this transcript requesting?
 ```
 
-If yes, use the deterministic path. If no, send the transcript as a normal Pig/Gemma message.
+If the compiler validates, resolves, and lowers a command, Pig uses the deterministic path. If not, the transcript continues as a normal Pig/Gemma message.
 
-## Router shape
+## Compiler shape
 
-The router is intentionally split into three nodes:
+The router is now a thin extension wrapper around a typed command compiler:
 
 ```text
-1. Broad rules gate
-   → deterministic | normal_msg
-
-2. Deterministic selector
-   → choose the best matching skill/affordance
-
-3. Execution gate
-   → direct_exec if metadata says a script is safe and the request is exact enough
-   → otherwise pi_skill contextual path
+input eligibility is handled by the Pig input hook
+→ extractor stack
+   - temporary exact/rule extractor
+   - metadata BM25 extractor over `compiler.json` intent metadata
+   - optional FastEmbed embedding extractor over the same metadata (`PIG_ENABLE_EMBEDDING_EXTRACTOR=1`)
+→ CommandIR candidate selection
+→ typecheck
+→ Pig command state / reference resolution
+→ preconditions
+→ table-driven lowering
+→ direct_exec or pi_skill
+→ otherwise normal_msg
 ```
 
-Current implementation is basic deterministic code: lowercase, tokenize, match weighted keywords/phrases, score candidates, and threshold. Planned expansion point: keep the broad bucket gate, then replace/improve the deterministic selector with embeddings, and optionally add cross-encoder reranking later.
+BM25 and embeddings are now extractors, not routers. They emit `CommandIRCandidate`s from `compiler.json` metadata evidence; they do not select scripts or bypass compiler validation. The first exact/rule extractor is intentionally a placeholder; the important pieces now in place are CommandIR, stackable async extractor boundaries, metadata BM25 extraction, optional FastEmbed semantic extraction, Pig command state, typechecking, reference resolution, metadata-driven preconditions, table-loaded lowering to existing safe direct-exec actions, and compiler trace logging.
 
 ## Buckets
 
@@ -40,16 +43,22 @@ executionMode=direct_exec  run an explicitly opted-in safe script, then pass com
 Current accepted metadata safety classes: `read_only_network`, `read_only_local`, and `local_capture`.
 ```
 
-## Current catalog
+## Current Catalog
 
-By default the router catalogs Pig skills from:
+Pi owns skill discovery. This extension contributes Pig skill paths through `resources_discover`:
 
 ```text
 ~/.pig/agent/skills
 ./.pig/skills
 ```
 
-Set `PI_VOICE_INCLUDE_PI_SKILLS=1` to also include normal Pi skill roots.
+At route time, the extension builds its route resources from:
+
+```ts
+pi.getCommands().filter((command) => command.source === "skill")
+```
+
+Routing, compiler, and direct-exec metadata are loaded beside each discovered skill's actual `SKILL.md` path. `compiler.json` owns language-to-IR metadata and lowering/precondition rules; `direct-exec.json` owns safe script eligibility.
 
 Current obvious Pig skill affordances include:
 
@@ -57,6 +66,12 @@ Current obvious Pig skill affordances include:
 - `take-screenshot`
 - `take-photo`
 - `intent-router-error-log`
+
+Refactor guide:
+
+```text
+docs/refactor-to-command-compiler.md
+```
 
 ## Integration with voice/audio input
 
@@ -78,13 +93,24 @@ pi-voice-vad-gemma
 The router also exports functions for tests/diagnostics:
 
 ```ts
-routeVoiceTranscript(text)
-resolveSkill(name)
+loadRouteResourcesFromCommands(commands)
+routeVoiceTranscript(text, resources)
+compileVoiceCommand(text, resources)
+resolveSkill(name, resources.catalog)
 buildSkillUserMessage(skill, text)
-runDirectExecAction(candidate)
+runDirectExecAction(candidate, timeoutMs, resources.actions)
 buildDirectExecResultMessage(decision, result)
 logVoiceRouteDecision(decision)
 ```
+
+## Development
+
+```bash
+npm run check
+npm test
+```
+
+`npm test` builds TypeScript and runs the compiler smoke regressions in `tests/compiler-smoke.mjs`.
 
 ## Commands
 
