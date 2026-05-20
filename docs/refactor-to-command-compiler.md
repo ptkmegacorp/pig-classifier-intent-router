@@ -362,19 +362,29 @@ Target flow:
 utterance -> CommandIR candidates -> typecheck -> resolve refs -> preconditions -> lower -> execute / fallback
 ```
 
-## Implementation Plan
+## Refactor Plan And Current Implementation
 
-Suggested staged refactor:
+This refactor is being implemented inside `pig-classifier-intent-router`, which remains a Pig extension package. Pig is a local fork/downstream of the Pi harness, so this package should keep using Pi/Pig extension surfaces (`input`, `resources_discover`, `pi.getCommands()`, skill command provenance) while replacing the internal deterministic routing architecture.
 
-1. Define `CommandIR` types in code.
-2. Add a generic extractor interface that emits `CommandIR` candidates.
-3. Implement a small default parser/extractor for current deterministic domains.
-4. Add a typechecker for domain/action/object/target validity.
-5. Add a reference resolver backed by Pig state.
-6. Add a lowering table from validated IR to existing skills/scripts.
-7. Keep required-context checks as preconditions.
-8. Keep BM25 only as a backup stabilizer.
-9. Add regression tests for screenshot, photo, and weather confusion.
+Current staged plan:
+
+1. Define `CommandIR` types in code. **Done:** see `src/compiler/ir.ts`.
+2. Add a replaceable extractor boundary that emits `CommandIR` candidates. **Done:** `src/compiler/extractors.ts` defines a `CommandExtractor` interface and `runExtractorStack()`, so future extractors can be stacked or swapped without changing validation/lowering.
+3. Keep a placeholder extractor only to exercise the pipeline. **Done:** `src/compiler/defaultExtractor.ts` is intentionally a temporary dumb rule extractor.
+4. Implement compiler stages independent of the final extractor:
+   - state snapshot: `src/compiler/state.ts`
+   - typecheck: `src/compiler/typecheck.ts`
+   - reference resolution: `src/compiler/resolve.ts`
+   - preconditions: `src/compiler/preconditions.ts`
+   - metadata/table-driven lowering: `src/compiler/lower.ts`
+   - orchestration/trace: `src/compiler/compiler.ts`
+5. Route through the compiler first, then fall back to the legacy metadata/BM25 router when the compiler emits chat, fails validation, misses preconditions, or cannot lower. **Done:** `routeVoiceTranscript()` now attaches `compilerTrace` to route decisions.
+6. Keep required-context checks as preconditions and keep direct-exec safety metadata as the executor/lowering eligibility source.
+7. Keep BM25 only as a backup stabilizer during transition.
+8. Add regression tests for screenshot, photo, and weather confusion. **Started:** `tests/compiler-smoke.mjs` covers the core flow after `npm run build`.
+9. Replace the placeholder extractor with the real extractor once the compiler contract and trace shape are stable.
+
+The temporary extractor should not receive much investment. Its purpose is only to exercise the typed compiler pipeline so the rest of the architecture can be debugged now.
 
 ## Initial Domains
 

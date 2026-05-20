@@ -3,6 +3,11 @@ import { homedir } from "node:os";
 import { extname, join } from "node:path";
 import type { ImageContent } from "@mariozechner/pi-ai";
 import type { ExtensionAPI, SlashCommandInfo } from "@mariozechner/pi-coding-agent";
+import { compileVoiceCommand } from "./compiler/compiler.js";
+import { defaultCommandExtractor } from "./compiler/defaultExtractor.js";
+import { runExtractorStack } from "./compiler/extractors.js";
+import { getLoweringRules } from "./compiler/lower.js";
+import { getPigCommandState } from "./compiler/state.js";
 import {
   buildDirectExecResultMessage,
   buildSkillUserMessage,
@@ -18,6 +23,11 @@ import {
 } from "./router.js";
 
 export {
+  compileVoiceCommand,
+  defaultCommandExtractor,
+  getLoweringRules,
+  getPigCommandState,
+  runExtractorStack,
   buildDirectExecResultMessage,
   buildSkillUserMessage,
   buildVisualInspectionMessage,

@@ -3,6 +3,8 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { basename, dirname, isAbsolute, join, normalize, resolve } from "node:path";
 import { homedir } from "node:os";
+import { compileVoiceCommand } from "./compiler/compiler.js";
+import type { CommandCompilerTrace } from "./compiler/ir.js";
 
 export type VoiceRouteBucket = "deterministic" | "normal_msg";
 export type RouteExecutionMode = "pi_skill" | "direct_exec" | null;
@@ -105,6 +107,8 @@ export interface VoiceRouteDecision {
   matchedTerms: string[];
   matchedIntents: RoutingIntent[];
   topCandidates: SkillScore[];
+  /** Compiler trace is present when the typed command compiler ran before legacy routing. */
+  compilerTrace?: CommandCompilerTrace;
   timestamp: string;
 }
 
@@ -660,6 +664,34 @@ function selectDirectExecCandidate(text: string, actions: DirectExecAction[], se
 export function routeVoiceTranscript(text: string, resources: RouteResources): VoiceRouteDecision {
   const cleaned = text.trim();
   const { catalog, actions: directActions } = resources;
+  const compiler = compileVoiceCommand(cleaned, resources);
+
+  if (compiler.handled) {
+    const gate: BroadGateDecision = {
+      bucket: "deterministic",
+      deterministicKind: "skill_or_action",
+      confidence: compiler.confidence,
+      reason: "typed command compiler selected deterministic command",
+      matchedTerms: compiler.matchedTerms,
+      matchedFamilies: compiler.trace.selectedIR?.kind === "command" ? [compiler.trace.selectedIR.domain] : [],
+    };
+    return {
+      bucket: "deterministic",
+      executionMode: compiler.executionMode,
+      broadGate: gate,
+      candidateSkill: compiler.candidateSkill,
+      directExec: compiler.directExec,
+      confidence: compiler.confidence,
+      reason: `compiler route: ${compiler.reason}`,
+      text: cleaned,
+      matchedTerms: compiler.matchedTerms,
+      matchedIntents: compiler.matchedIntents,
+      topCandidates: [],
+      compilerTrace: compiler.trace,
+      timestamp: new Date().toISOString(),
+    };
+  }
+
   const gate = broadGate(cleaned, catalog, directActions);
 
   if (gate.bucket === "normal_msg") {
@@ -675,6 +707,7 @@ export function routeVoiceTranscript(text: string, resources: RouteResources): V
       matchedTerms: gate.matchedTerms,
       matchedIntents: [],
       topCandidates: [],
+      compilerTrace: compiler.trace,
       timestamp: new Date().toISOString(),
     };
   }
@@ -705,6 +738,7 @@ export function routeVoiceTranscript(text: string, resources: RouteResources): V
       matchedTerms: directExec.matchedTerms,
       matchedIntents: directExec.matchedIntents,
       topCandidates: candidates,
+      compilerTrace: compiler.trace,
       timestamp: new Date().toISOString(),
     };
   }
@@ -725,6 +759,7 @@ export function routeVoiceTranscript(text: string, resources: RouteResources): V
     matchedTerms: best?.matchedTerms ?? gate.matchedTerms,
     matchedIntents: best?.matchedIntents ?? [],
     topCandidates: candidates,
+    compilerTrace: compiler.trace,
     timestamp: new Date().toISOString(),
   };
 }

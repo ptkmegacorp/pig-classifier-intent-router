@@ -26,7 +26,7 @@ The router is intentionally split into three nodes:
    → otherwise pi_skill contextual path
 ```
 
-Current implementation is staged deterministic code: Pi discovers skills, the router reads adjacent `routing.json`/`direct-exec.json` metadata, applies broad family gates, scores eligible skill/intent metadata with lightweight BM25, checks required context, and thresholds direct execution. Planned refactor: move the selector toward a typed command compiler for deterministic computer-use domains.
+Current implementation is mid-refactor: Pi discovers skills, the router reads adjacent `routing.json`/`direct-exec.json` metadata, then tries a typed command compiler for deterministic computer-use domains before falling back to the legacy broad-gate/BM25 selector. The first compiler extractor is intentionally a placeholder; the important pieces now in place are CommandIR, stackable extractor boundaries, Pig command state, typechecking, reference resolution, preconditions, table-driven lowering to existing safe direct-exec actions, and compiler trace logging.
 
 ## Buckets
 
@@ -92,12 +92,22 @@ The router also exports functions for tests/diagnostics:
 ```ts
 loadRouteResourcesFromCommands(commands)
 routeVoiceTranscript(text, resources)
+compileVoiceCommand(text, resources)
 resolveSkill(name, resources.catalog)
 buildSkillUserMessage(skill, text)
 runDirectExecAction(candidate, timeoutMs, resources.actions)
 buildDirectExecResultMessage(decision, result)
 logVoiceRouteDecision(decision)
 ```
+
+## Development
+
+```bash
+npm run check
+npm test
+```
+
+`npm test` builds TypeScript and runs the compiler smoke regressions in `tests/compiler-smoke.mjs`.
 
 ## Commands
 
