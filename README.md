@@ -18,15 +18,15 @@ The router is intentionally split into three nodes:
 1. Broad rules gate
    → deterministic | normal_msg
 
-2. Deterministic selector
-   → choose the best matching skill/affordance
+2. Metadata/BM25 selector
+   → choose the best matching Pi-discovered skill/intent inside the matched family
 
 3. Execution gate
    → direct_exec if metadata says a script is safe and the request is exact enough
    → otherwise pi_skill contextual path
 ```
 
-Current implementation is basic deterministic code: lowercase, tokenize, match weighted keywords/phrases, score candidates, and threshold. Planned expansion point: keep the broad bucket gate, then replace/improve the deterministic selector with embeddings, and optionally add cross-encoder reranking later.
+Current implementation is staged deterministic code: Pi discovers skills, the router reads adjacent `routing.json`/`direct-exec.json` metadata, applies broad family gates, scores eligible skill/intent metadata with lightweight BM25, checks required context, and thresholds direct execution. Planned refactor: move the selector toward a generic extractor/frame pattern for deterministic computer-use domains.
 
 ## Buckets
 
@@ -40,16 +40,22 @@ executionMode=direct_exec  run an explicitly opted-in safe script, then pass com
 Current accepted metadata safety classes: `read_only_network`, `read_only_local`, and `local_capture`.
 ```
 
-## Current catalog
+## Current Catalog
 
-By default the router catalogs Pig skills from:
+Pi owns skill discovery. This extension contributes Pig skill paths through `resources_discover`:
 
 ```text
 ~/.pig/agent/skills
 ./.pig/skills
 ```
 
-Set `PI_VOICE_INCLUDE_PI_SKILLS=1` to also include normal Pi skill roots.
+At route time, the extension builds its route resources from:
+
+```ts
+pi.getCommands().filter((command) => command.source === "skill")
+```
+
+Routing and direct-exec metadata are loaded beside each discovered skill's `sourceInfo.baseDir`.
 
 Current obvious Pig skill affordances include:
 
@@ -57,6 +63,12 @@ Current obvious Pig skill affordances include:
 - `take-screenshot`
 - `take-photo`
 - `intent-router-error-log`
+
+Refactor guide:
+
+```text
+docs/refactor-to-extractor-pattern.md
+```
 
 ## Integration with voice/audio input
 
@@ -78,10 +90,11 @@ pi-voice-vad-gemma
 The router also exports functions for tests/diagnostics:
 
 ```ts
-routeVoiceTranscript(text)
-resolveSkill(name)
+loadRouteResourcesFromCommands(commands)
+routeVoiceTranscript(text, resources)
+resolveSkill(name, resources.catalog)
 buildSkillUserMessage(skill, text)
-runDirectExecAction(candidate)
+runDirectExecAction(candidate, timeoutMs, resources.actions)
 buildDirectExecResultMessage(decision, result)
 logVoiceRouteDecision(decision)
 ```

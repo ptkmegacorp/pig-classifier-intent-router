@@ -6,12 +6,13 @@ flowchart TD
     B --> C[pi.sendUserMessage cleaned text]
     C --> D0[Pig input event hook]
     D0 --> D[pig-classifier-intent-router]
-    D --> E0[Broad rules gate]
+    D --> P[Pi-discovered skill commands + adjacent routing/direct-exec metadata]
+    P --> E0[Broad family gate]
     E0 --> E1{Broad bucket}
     E1 -- normal_msg --> I[sendUserMessage transcript]
-    E1 -- deterministic --> E[Deterministic selector: rules now / embeddings later]
+    E1 -- deterministic --> E[BM25 selector over eligible skill/intent metadata]
     E --> X{Execution gate}
-    X -- exact + safe metadata --> J[Execute opted-in script]
+    X -- exact + safe metadata + context ok --> J[Execute opted-in script]
     X -- contextual skill --> G[Expand selected SKILL.md block]
     X -- not confident --> I
     G --> H[sendUserMessage skill block + transcript]
