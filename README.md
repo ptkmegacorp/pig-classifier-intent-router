@@ -5,28 +5,31 @@ Pig extension package for routing voice/audio transcripts and other Pig input th
 Core question:
 
 ```text
-Does this transcript confidently match one of our known deterministic affordances?
+What typed command, if any, is this transcript requesting?
 ```
 
-If yes, use the deterministic path. If no, send the transcript as a normal Pig/Gemma message.
+If the compiler validates, resolves, and lowers a command, Pig uses the deterministic path. If not, the transcript continues as a normal Pig/Gemma message.
 
-## Router shape
+## Compiler shape
 
-The router is intentionally split into three nodes:
+The router is now a thin extension wrapper around a typed command compiler:
 
 ```text
-1. Broad family gate
-   → deterministic | normal_msg
-
-2. Metadata/BM25 selector
-   → choose the best matching Pi-discovered skill/intent inside the matched family
-
-3. Execution gate
-   → direct_exec if metadata says a script is safe and the request is exact enough
-   → otherwise pi_skill contextual path
+input eligibility is handled by the Pig input hook
+→ extractor stack
+   - temporary exact/rule extractor
+   - metadata BM25 extractor over `compiler.json` intent metadata
+   - optional FastEmbed embedding extractor over the same metadata (`PIG_ENABLE_EMBEDDING_EXTRACTOR=1`)
+→ CommandIR candidate selection
+→ typecheck
+→ Pig command state / reference resolution
+→ preconditions
+→ table-driven lowering
+→ direct_exec or pi_skill
+→ otherwise normal_msg
 ```
 
-Current implementation is mid-refactor: Pi discovers skills, the router reads adjacent `routing.json`/`direct-exec.json` metadata, then tries a typed command compiler for deterministic computer-use domains before falling back to the legacy broad-gate/BM25 selector. The first compiler extractor is intentionally a placeholder; the important pieces now in place are CommandIR, stackable extractor boundaries, Pig command state, typechecking, reference resolution, preconditions, table-driven lowering to existing safe direct-exec actions, and compiler trace logging.
+BM25 and embeddings are now extractors, not routers. They emit `CommandIRCandidate`s from `compiler.json` metadata evidence; they do not select scripts or bypass compiler validation. The first exact/rule extractor is intentionally a placeholder; the important pieces now in place are CommandIR, stackable async extractor boundaries, metadata BM25 extraction, optional FastEmbed semantic extraction, Pig command state, typechecking, reference resolution, metadata-driven preconditions, table-loaded lowering to existing safe direct-exec actions, and compiler trace logging.
 
 ## Buckets
 
@@ -55,7 +58,7 @@ At route time, the extension builds its route resources from:
 pi.getCommands().filter((command) => command.source === "skill")
 ```
 
-Routing and direct-exec metadata are loaded beside each discovered skill's `sourceInfo.baseDir`.
+Routing, compiler, and direct-exec metadata are loaded beside each discovered skill's actual `SKILL.md` path. `compiler.json` owns language-to-IR metadata and lowering/precondition rules; `direct-exec.json` owns safe script eligibility.
 
 Current obvious Pig skill affordances include:
 

@@ -1,6 +1,8 @@
 import type { DirectExecAction, RouteResources } from "../router.js";
 import { defaultCommandExtractor } from "./defaultExtractor.js";
 import { runExtractorStack, type CommandExtractor } from "./extractors.js";
+import { metadataBm25Extractor } from "./metadataBm25Extractor.js";
+import { embeddingExtractor } from "./embeddingExtractor.js";
 import type { CommandCompilerDecision, CommandCompilerTrace, CommandIRCandidate } from "./ir.js";
 import { lowerCommand } from "./lower.js";
 import { checkCommandPreconditions } from "./preconditions.js";
@@ -17,9 +19,11 @@ function actionStillEligible(candidate: NonNullable<ReturnType<typeof lowerComma
   return actions.some((action) => action.id === candidate.actionId && action.skill === candidate.skill);
 }
 
-export function compileVoiceCommand(text: string, resources: RouteResources, extractors: CommandExtractor[] = [defaultCommandExtractor]): CommandCompilerDecision {
+export const DEFAULT_EXTRACTOR_STACK: CommandExtractor[] = [defaultCommandExtractor, metadataBm25Extractor, embeddingExtractor];
+
+export async function compileVoiceCommand(text: string, resources: RouteResources, extractors: CommandExtractor[] = DEFAULT_EXTRACTOR_STACK): Promise<CommandCompilerDecision> {
   const state = getPigCommandState();
-  const candidates = runExtractorStack(text, resources, extractors);
+  const candidates = await runExtractorStack(text, resources, extractors);
   const trace = emptyTrace(extractors, candidates);
   trace.state = state;
   const selected = candidates[0]?.ir ?? null;
@@ -49,17 +53,17 @@ export function compileVoiceCommand(text: string, resources: RouteResources, ext
     return { handled: false, trace, executionMode: null, candidateSkill: null, directExec: null, confidence: selected.confidence, reason: trace.fallbackReason, matchedTerms: candidates[0]?.matchedTerms ?? [], matchedIntents: selected.intent ? [selected.intent] : [] };
   }
 
-  const preconditions = checkCommandPreconditions(resolved);
-  trace.preconditions = preconditions;
-  if (!preconditions.ok) {
-    trace.fallbackReason = `preconditions failed: ${preconditions.missing.join(", ")}`;
-    return { handled: false, trace, executionMode: null, candidateSkill: null, directExec: null, confidence: selected.confidence, reason: trace.fallbackReason, matchedTerms: candidates[0]?.matchedTerms ?? [], matchedIntents: selected.intent ? [selected.intent] : [] };
-  }
-
-  const lowered = lowerCommand(resolved, resources.actions);
+  const lowered = lowerCommand(resolved, resources);
   trace.lowered = lowered;
   if (!lowered) {
     trace.fallbackReason = "no lowering rule matched command";
+    return { handled: false, trace, executionMode: null, candidateSkill: null, directExec: null, confidence: selected.confidence, reason: trace.fallbackReason, matchedTerms: candidates[0]?.matchedTerms ?? [], matchedIntents: selected.intent ? [selected.intent] : [] };
+  }
+
+  const preconditions = checkCommandPreconditions(resolved, lowered.requiredContext);
+  trace.preconditions = preconditions;
+  if (!preconditions.ok) {
+    trace.fallbackReason = `preconditions failed: ${preconditions.missing.join(", ")}`;
     return { handled: false, trace, executionMode: null, candidateSkill: null, directExec: null, confidence: selected.confidence, reason: trace.fallbackReason, matchedTerms: candidates[0]?.matchedTerms ?? [], matchedIntents: selected.intent ? [selected.intent] : [] };
   }
 

@@ -3,8 +3,10 @@ import { homedir } from "node:os";
 import { extname, join } from "node:path";
 import type { ImageContent } from "@mariozechner/pi-ai";
 import type { ExtensionAPI, SlashCommandInfo } from "@mariozechner/pi-coding-agent";
-import { compileVoiceCommand } from "./compiler/compiler.js";
+import { compileVoiceCommand, DEFAULT_EXTRACTOR_STACK } from "./compiler/compiler.js";
 import { defaultCommandExtractor } from "./compiler/defaultExtractor.js";
+import { metadataBm25Extractor } from "./compiler/metadataBm25Extractor.js";
+import { embeddingExtractor } from "./compiler/embeddingExtractor.js";
 import { runExtractorStack } from "./compiler/extractors.js";
 import { getLoweringRules } from "./compiler/lower.js";
 import { getPigCommandState } from "./compiler/state.js";
@@ -24,7 +26,10 @@ import {
 
 export {
   compileVoiceCommand,
+  DEFAULT_EXTRACTOR_STACK,
   defaultCommandExtractor,
+  metadataBm25Extractor,
+  embeddingExtractor,
   getLoweringRules,
   getPigCommandState,
   runExtractorStack,
@@ -88,9 +93,9 @@ export default function pigClassifierIntentRouter(pi: ExtensionAPI) {
     return loadRouteResourcesFromCommands(pi.getCommands().filter((command): command is SlashCommandInfo & { source: "skill" } => command.source === "skill"));
   }
 
-  function routeTextForPi(text: string): { messageText: string; decision: ReturnType<typeof routeVoiceTranscript>; resources: ReturnType<typeof routeResources> } {
+  async function routeTextForPi(text: string): Promise<{ messageText: string; decision: Awaited<ReturnType<typeof routeVoiceTranscript>>; resources: ReturnType<typeof routeResources> }> {
     const resources = routeResources();
-    const decision = routeVoiceTranscript(text, resources);
+    const decision = await routeVoiceTranscript(text, resources);
     logVoiceRouteDecision(decision);
 
     let messageText = decision.text;
@@ -116,7 +121,7 @@ export default function pigClassifierIntentRouter(pi: ExtensionAPI) {
       return { action: "continue" as const };
     }
 
-    const { messageText, decision, resources } = routeTextForPi(text);
+    const { messageText, decision, resources } = await routeTextForPi(text);
 
     if (decision.executionMode === "direct_exec" && decision.directExec) {
       try {
@@ -156,7 +161,7 @@ export default function pigClassifierIntentRouter(pi: ExtensionAPI) {
         return;
       }
       const resources = routeResources();
-      const decision = routeVoiceTranscript(text, resources);
+      const decision = await routeVoiceTranscript(text, resources);
       try {
         logVoiceRouteDecision(decision);
       } catch {
@@ -174,7 +179,7 @@ export default function pigClassifierIntentRouter(pi: ExtensionAPI) {
         ctx.ui.notify("Usage: /intent-send <text>", "info");
         return;
       }
-      const { messageText, decision } = routeTextForPi(text);
+      const { messageText, decision } = await routeTextForPi(text);
       ctx.ui.notify(`intent bucket=${decision.bucket} skill=${decision.candidateSkill ?? "none"} confidence=${decision.confidence}`, "info");
       if (ctx.isIdle()) pi.sendUserMessage(messageText);
       else pi.sendUserMessage(messageText, { deliverAs: "followUp" });

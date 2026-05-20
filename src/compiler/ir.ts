@@ -74,6 +74,7 @@ export interface LoweredCommand {
   executionMode: "direct_exec" | "pi_skill";
   candidateSkill: string | null;
   directExec: DirectExecCandidate | null;
+  requiredContext: string[];
   reason: string;
 }
 

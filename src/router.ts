@@ -29,6 +29,23 @@ export interface RoutingMetadata {
   intents: Record<RoutingIntent, RoutingIntentMetadata>;
 }
 
+export interface CompilerIntentMetadata {
+  id: RoutingIntent;
+  ir: Record<string, unknown>;
+  examples: string[];
+  keywords: string[];
+  negativeExamples: string[];
+}
+
+export interface CompilerLoweringMetadata {
+  match: Record<string, unknown>;
+  actionId?: string;
+  fallbackSkill: string;
+  matchedIntents: RoutingIntent[];
+  requiredContext: string[];
+  reason?: string;
+}
+
 export interface SkillCatalogEntry {
   name: string;
   description: string;
@@ -36,11 +53,12 @@ export interface SkillCatalogEntry {
   baseDir: string;
   commandName: string | null;
   family: RoutingFamily | null;
-  /** Terms/phrases that make this skill a known deterministic affordance. */
   keywords: string[];
   examples: string[];
   negativeExamples: string[];
   intents: Record<RoutingIntent, RoutingIntentMetadata>;
+  compilerIntents: CompilerIntentMetadata[];
+  compilerLowering: CompilerLoweringMetadata[];
 }
 
 export interface SkillScore {
@@ -83,22 +101,9 @@ export interface DirectExecCandidate {
   outputImageKey: string | null;
 }
 
-export interface BroadGateDecision {
-  bucket: VoiceRouteBucket;
-  deterministicKind: "skill_or_action" | null;
-  confidence: number;
-  reason: string;
-  matchedTerms: string[];
-  matchedFamilies: RoutingFamily[];
-}
-
 export interface VoiceRouteDecision {
-  /** Final runtime bucket: either deterministic or normal fallback. */
   bucket: VoiceRouteBucket;
-  /** Execution mode inside the deterministic bucket. */
   executionMode: RouteExecutionMode;
-  /** First-stage rules gate. Later this can be a tiny classifier. */
-  broadGate: BroadGateDecision;
   candidateSkill: string | null;
   directExec: DirectExecCandidate | null;
   confidence: number;
@@ -107,8 +112,7 @@ export interface VoiceRouteDecision {
   matchedTerms: string[];
   matchedIntents: RoutingIntent[];
   topCandidates: SkillScore[];
-  /** Compiler trace is present when the typed command compiler ran before legacy routing. */
-  compilerTrace?: CommandCompilerTrace;
+  compilerTrace: CommandCompilerTrace;
   timestamp: string;
 }
 
@@ -139,17 +143,9 @@ export interface ResolvedSkill {
   body: string;
 }
 
-const PI_SKILL_THRESHOLD = Number(process.env.PI_VOICE_SKILL_THRESHOLD ?? "0.5");
-const PI_SKILL_MARGIN = Number(process.env.PI_VOICE_SKILL_MARGIN ?? "0.12");
-const DIRECT_EXEC_THRESHOLD = Number(process.env.PI_VOICE_DIRECT_EXEC_THRESHOLD ?? "0.85");
 const execFileAsync = promisify(execFile);
 
-const STOP_WORDS = new Set([
-  "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "in", "is", "it", "of", "on", "or", "the", "to", "use", "user", "when", "with",
-  "asks", "ask", "agent", "ai", "pig", "pi", "current", "latest", "today", "what", "this", "that", "there", "here",
-]);
-
-function unique(values: string[]): string[] {
+function unique<T>(values: T[]): T[] {
   return [...new Set(values)];
 }
 
@@ -168,31 +164,6 @@ function routingFamily(value: unknown): RoutingFamily | null {
 
 function outputKey(value: unknown): string | null {
   return typeof value === "string" && /^[A-Z0-9_]+$/.test(value) ? value : null;
-}
-
-function tokenizeAll(text: string): string[] {
-  return text
-    .toLowerCase()
-    .replace(/[^a-z0-9\s-]/g, " ")
-    .split(/\s+/)
-    .map((token) => token.trim())
-    .filter((token) => token.length >= 3 && !STOP_WORDS.has(token));
-}
-
-function tokenize(text: string): string[] {
-  return unique(tokenizeAll(text));
-}
-
-function normalizeForPhrase(text: string): string {
-  return ` ${text.toLowerCase().replace(/[^a-z0-9\s-]/g, " ").replace(/\s+/g, " ").trim()} `;
-}
-
-function phraseMatches(text: string, phrase: string): boolean {
-  return normalizeForPhrase(text).includes(normalizeForPhrase(phrase));
-}
-
-function termMatches(text: string, tokens: Set<string>, term: string): boolean {
-  return term.includes(" ") ? phraseMatches(text, term) : tokens.has(term.toLowerCase());
 }
 
 function parseFrontmatter(raw: string): { name?: string; description?: string; body: string } {
@@ -253,6 +224,33 @@ function loadRoutingMetadata(skillDir: string): RoutingMetadata {
   }
 }
 
+function loadCompilerMetadata(skillDir: string): { intents: CompilerIntentMetadata[]; lowering: CompilerLoweringMetadata[] } {
+  const path = join(skillDir, "compiler.json");
+  if (!existsSync(path)) return { intents: [], lowering: [] };
+  try {
+    const raw = JSON.parse(readFileSync(path, "utf-8"));
+    const intents = Array.isArray(raw.intents) ? raw.intents.flatMap((item: any): CompilerIntentMetadata[] => {
+      const id = routingIntent(item?.id);
+      if (!id || !item?.ir || typeof item.ir !== "object") return [];
+      return [{ id, ir: item.ir, examples: stringArray(item.examples), keywords: stringArray(item.keywords), negativeExamples: stringArray(item.negativeExamples) }];
+    }) : [];
+    const lowering = Array.isArray(raw.lowering) ? raw.lowering.flatMap((item: any): CompilerLoweringMetadata[] => {
+      if (!item?.match || typeof item.match !== "object" || typeof item.fallbackSkill !== "string") return [];
+      return [{
+        match: item.match,
+        actionId: typeof item.actionId === "string" ? item.actionId : undefined,
+        fallbackSkill: item.fallbackSkill,
+        matchedIntents: stringArray(item.matchedIntents),
+        requiredContext: stringArray(item.requiredContext),
+        reason: typeof item.reason === "string" ? item.reason : undefined,
+      }];
+    }) : [];
+    return { intents, lowering };
+  } catch {
+    return { intents: [], lowering: [] };
+  }
+}
+
 function safeScriptPath(baseDir: string, script: string): string | null {
   if (isAbsolute(script) || script.includes("..")) return null;
   const full = resolve(baseDir, script);
@@ -262,11 +260,7 @@ function safeScriptPath(baseDir: string, script: string): string | null {
   return full;
 }
 
-const DIRECT_EXEC_ALLOWED_SAFETY = new Set([
-  "read_only_network",
-  "read_only_local",
-  "local_capture",
-]);
+const DIRECT_EXEC_ALLOWED_SAFETY = new Set(["read_only_network", "read_only_local", "local_capture"]);
 
 function isDirectExecSafe(action: any): boolean {
   return action?.directExec === true
@@ -286,7 +280,9 @@ export function loadSkillCatalogFromCommands(commands: DiscoveredSkillCommand[])
   for (const command of commands) {
     if (command.source !== "skill") continue;
     const skillFile = command.sourceInfo.path;
-    const skillDir = command.sourceInfo.baseDir ?? dirname(skillFile);
+    // Load routing/direct-exec metadata beside the actual SKILL.md file.
+    // command.sourceInfo.baseDir may point at the extension/package base dir.
+    const skillDir = dirname(skillFile);
     try {
       if (!existsSync(skillFile)) continue;
       const raw = readFileSync(skillFile, "utf-8");
@@ -295,13 +291,9 @@ export function loadSkillCatalogFromCommands(commands: DiscoveredSkillCommand[])
       if (!name || byName.has(name)) continue;
       const description = command.description ?? parsed.description ?? "";
       const routing = loadRoutingMetadata(skillDir);
+      const compiler = loadCompilerMetadata(skillDir);
       if (!routing.enabled || !routing.deterministicAffordance) continue;
       const intentTerms = Object.values(routing.intents).flatMap((intent) => [...intent.examples, ...intent.keywords]);
-      const keywords = unique([
-        ...routing.examples,
-        ...routing.keywords,
-        ...intentTerms,
-      ]);
       byName.set(name, {
         name,
         description,
@@ -309,13 +301,15 @@ export function loadSkillCatalogFromCommands(commands: DiscoveredSkillCommand[])
         baseDir: skillDir,
         commandName: command.name,
         family: routing.family,
-        keywords,
+        keywords: unique([...routing.examples, ...routing.keywords, ...intentTerms]),
         examples: routing.examples,
         negativeExamples: routing.negativeExamples,
         intents: routing.intents,
+        compilerIntents: compiler.intents,
+        compilerLowering: compiler.lowering,
       });
     } catch {
-      // Ignore unreadable/broken skills in the router catalog.
+      // Ignore unreadable/broken skills in the compiler catalog.
     }
   }
   return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
@@ -377,308 +371,13 @@ export function loadRouteResourcesFromCommands(commands: DiscoveredSkillCommand[
   return { catalog, actions: loadDirectExecActionsFromCatalog(catalog) };
 }
 
-interface RoutingTerm {
-  term: string;
-  family: RoutingFamily | null;
-}
-
-function routingTermsForSkill(skill: SkillCatalogEntry): RoutingTerm[] {
-  const terms: RoutingTerm[] = skill.keywords.map((term) => ({ term, family: skill.family }));
-  for (const metadata of Object.values(skill.intents)) {
-    const family = metadata.family ?? skill.family;
-    for (const term of [...metadata.examples, ...metadata.keywords]) terms.push({ term, family });
-  }
-  return terms;
-}
-
-function broadGate(text: string, catalog: SkillCatalogEntry[], actions: DirectExecAction[]): BroadGateDecision {
-  const negativeMatches = catalog.flatMap((skill) => skill.negativeExamples).filter((term) => phraseMatches(text, term));
-  if (negativeMatches.length > 0) {
-    return {
-      bucket: "normal_msg",
-      deterministicKind: null,
-      confidence: 0.05,
-      reason: "matched known negative routing example",
-      matchedTerms: unique(negativeMatches),
-      matchedFamilies: [],
-    };
-  }
-
-  const terms = [
-    ...catalog.flatMap(routingTermsForSkill),
-    ...actions.flatMap((action) => [...action.keywords, ...action.exactPhrases].map((term) => ({ term, family: action.family }))),
-  ];
-  const tokens = new Set(tokenize(text));
-  const matches = terms.filter(({ term }) => termMatches(text, tokens, term));
-
-  if (matches.length > 0) {
-    return {
-      bucket: "deterministic",
-      deterministicKind: "skill_or_action",
-      confidence: Math.min(0.99, 0.35 + matches.length * 0.12),
-      reason: "matched known deterministic affordance term(s); run selector and execution gate",
-      matchedTerms: unique(matches.map(({ term }) => term)),
-      matchedFamilies: unique(matches.map(({ family }) => family).filter((family): family is RoutingFamily => Boolean(family))),
-    };
-  }
-
-  return {
-    bucket: "normal_msg",
-    deterministicKind: null,
-    confidence: 0.05,
-    reason: "no broad deterministic affordance matched",
-    matchedTerms: [],
-    matchedFamilies: [],
-  };
-}
-
-interface Bm25Document {
-  skill: string;
-  intent: RoutingIntent | null;
-  family: RoutingFamily | null;
-  phrases: string[];
-  negativePhrases: string[];
-  requiredContext: string[];
-  tokens: string[];
-  tokenCounts: Map<string, number>;
-  length: number;
-}
-
-function countTokens(tokens: string[]): Map<string, number> {
-  const counts = new Map<string, number>();
-  for (const token of tokens) counts.set(token, (counts.get(token) ?? 0) + 1);
-  return counts;
-}
-
-function bm25Document(skill: string, intent: RoutingIntent | null, family: RoutingFamily | null, fields: string[], negativePhrases: string[] = [], requiredContext: string[] = []): Bm25Document {
-  const phrases = unique(fields.filter((field) => field.trim().length > 0));
-  const tokens = fields.flatMap(tokenizeAll);
-  return {
-    skill,
-    intent,
-    family,
-    phrases,
-    negativePhrases: unique(negativePhrases),
-    requiredContext: unique(requiredContext),
-    tokens,
-    tokenCounts: countTokens(tokens),
-    length: Math.max(1, tokens.length),
-  };
-}
-
-function buildBm25Documents(catalog: SkillCatalogEntry[]): Bm25Document[] {
-  const docs: Bm25Document[] = [];
-  for (const skill of catalog) {
-    docs.push(bm25Document(skill.name, null, skill.family, [
-      skill.name.replace(/-/g, " "),
-      skill.description,
-      ...skill.examples,
-      ...skill.keywords,
-    ], skill.negativeExamples));
-    for (const [intent, metadata] of Object.entries(skill.intents)) {
-      docs.push(bm25Document(skill.name, intent, metadata.family ?? skill.family, [
-        intent.replace(/[_-]/g, " "),
-        ...metadata.examples,
-        ...metadata.keywords,
-      ], metadata.negativeExamples, metadata.requiredContext));
-    }
-  }
-  return docs;
-}
-
-function bm25Score(queryTokens: string[], doc: Bm25Document, docs: Bm25Document[], avgDocLength: number): number {
-  const k1 = 1.2;
-  const b = 0.75;
-  let score = 0;
-  for (const token of unique(queryTokens)) {
-    const tf = doc.tokenCounts.get(token) ?? 0;
-    if (tf === 0) continue;
-    const docsWithToken = docs.filter((candidate) => candidate.tokenCounts.has(token)).length;
-    const idf = Math.log(1 + (docs.length - docsWithToken + 0.5) / (docsWithToken + 0.5));
-    const denominator = tf + k1 * (1 - b + b * (doc.length / avgDocLength));
-    score += idf * ((tf * (k1 + 1)) / denominator);
-  }
-  return score;
-}
-
-function matchedDocumentTerms(text: string, doc: Bm25Document, queryTokens: Set<string>): string[] {
-  const phraseMatchesForDoc = doc.phrases.filter((phrase) => phrase.includes(" ") && phraseMatches(text, phrase));
-  const tokenMatchesForDoc = unique(doc.tokens.filter((token) => queryTokens.has(token)));
-  return unique([...phraseMatchesForDoc, ...tokenMatchesForDoc]);
-}
-
-function screenshotDir(): string {
-  return process.env.SCREENSHOT_DIR ?? "/home/bot/screenshots";
-}
-
-function hasDisplayContext(): boolean {
-  return Boolean(process.env.DISPLAY || process.env.WAYLAND_DISPLAY || existsSync("/tmp/.X11-unix/X0"));
-}
-
-function hasRecentScreenshotPath(): boolean {
-  return existsSync(join(screenshotDir(), "latest-screenshot"));
-}
-
-function missingRequiredContext(requiredContext: string[]): string[] {
-  return unique(requiredContext).filter((item) => {
-    switch (item) {
-      case "active_display":
-        return !hasDisplayContext();
-      case "recent_screenshot_path":
-        return !hasRecentScreenshotPath();
-      default:
-        return false;
-    }
-  });
-}
-
-/** Layer 2 selector: lightweight in-memory BM25 over skill and intent metadata docs. */
-function selectSkillCandidate(text: string, catalog: SkillCatalogEntry[], allowedFamilies: RoutingFamily[]): SkillScore[] {
-  const allDocs = buildBm25Documents(catalog);
-  const familySet = new Set(allowedFamilies);
-  const docs = allowedFamilies.length > 0
-    ? allDocs.filter((doc) => !doc.family || familySet.has(doc.family))
-    : allDocs;
-  if (docs.length === 0) return [];
-
-  const queryTokens = tokenizeAll(text);
-  if (queryTokens.length === 0) return [];
-
-  const queryTokenSet = new Set(queryTokens);
-  const avgDocLength = docs.reduce((sum, doc) => sum + doc.length, 0) / docs.length;
-  const rankedDocs = docs
-    .map((doc) => {
-      const matchedNegativePhrases = doc.negativePhrases.filter((phrase) => phraseMatches(text, phrase));
-      if (matchedNegativePhrases.length > 0) {
-        return {
-          doc,
-          rawScore: 0,
-          matchedTerms: matchedNegativePhrases,
-          matchedIntent: false,
-        };
-      }
-      const matchedPhrases = doc.phrases.filter((phrase) => phrase.includes(" ") && phraseMatches(text, phrase));
-      const phraseBoost = matchedPhrases.length * 1.5;
-      const rawScore = bm25Score(queryTokens, doc, docs, avgDocLength) + phraseBoost;
-      return {
-        doc,
-        rawScore,
-        matchedTerms: matchedDocumentTerms(text, doc, queryTokenSet),
-        matchedIntent: Boolean(doc.intent && matchedPhrases.length > 0),
-      };
-    })
-    .filter((result) => result.rawScore > 0)
-    .sort((a, b) => b.rawScore - a.rawScore);
-
-  const bySkill = new Map<string, { rawScore: number; matchedTerms: string[]; matchedIntents: RoutingIntent[] }>();
-  for (const result of rankedDocs) {
-    const current = bySkill.get(result.doc.skill) ?? { rawScore: 0, matchedTerms: [], matchedIntents: [] };
-    current.rawScore = Math.max(current.rawScore, result.rawScore);
-    current.matchedTerms = unique([...current.matchedTerms, ...result.matchedTerms]);
-    if (result.doc.intent && result.matchedIntent) current.matchedIntents = unique([...current.matchedIntents, result.doc.intent]);
-    bySkill.set(result.doc.skill, current);
-  }
-
-  return [...bySkill.entries()]
-    .map(([skill, result]) => ({
-      skill,
-      score: Math.min(0.99, Number((result.rawScore / (result.rawScore + 1.5)).toFixed(2))),
-      matchedTerms: result.matchedTerms,
-      matchedIntents: result.matchedIntents,
-    }))
-    .filter((candidate) => candidate.score > 0)
-    .sort((a, b) => b.score - a.score)
-    .slice(0, 5);
-}
-
-function scoreDirectExecAction(text: string, action: DirectExecAction, selectedSkill: SkillScore | null): DirectExecCandidate {
-  const tokens = new Set(tokenize(text));
-  const matchedTerms: string[] = [];
-  const matchedIntents: RoutingIntent[] = [];
-  const missingContext = missingRequiredContext(action.requiredContext);
-  let score = 0;
-
-  if (selectedSkill?.skill === action.skill) score += 0.18;
-
-  for (const phrase of action.exactPhrases) {
-    if (!phraseMatches(text, phrase)) continue;
-    matchedTerms.push(phrase);
-    score += 0.65;
-  }
-
-  for (const keyword of action.keywords) {
-    const matched = termMatches(text, tokens, keyword);
-    if (!matched) continue;
-    matchedTerms.push(keyword);
-    score += keyword.includes(" ") ? 0.25 : 0.08;
-  }
-
-  if (selectedSkill?.skill === action.skill && action.attachImageWhenIntent && selectedSkill.matchedIntents.includes(action.attachImageWhenIntent)) {
-    matchedIntents.push(action.attachImageWhenIntent);
-    score = Math.max(score, DIRECT_EXEC_THRESHOLD);
-  }
-
-  if (selectedSkill?.skill === action.skill && action.runWhenIntent && selectedSkill.matchedIntents.includes(action.runWhenIntent)) {
-    matchedIntents.push(action.runWhenIntent);
-    score = Math.max(score, DIRECT_EXEC_THRESHOLD);
-  }
-
-  return {
-    actionId: action.id,
-    skill: action.skill,
-    script: action.script,
-    args: action.defaultArgs,
-    score: missingContext.length > 0 ? 0 : Math.min(0.99, Number(score.toFixed(2))),
-    matchedTerms: unique(matchedTerms),
-    matchedIntents: unique(matchedIntents),
-    safety: action.safety,
-    missingContext,
-    outputImageKey: action.outputImageKey,
-  };
-}
-
-function selectDirectExecCandidate(text: string, actions: DirectExecAction[], selectedSkill: SkillScore | null): DirectExecCandidate | null {
-  const best = actions
-    .map((action) => scoreDirectExecAction(text, action, selectedSkill))
-    .filter((candidate) => candidate.score > 0)
-    .sort((a, b) => b.score - a.score)[0];
-  if (!best || best.score < DIRECT_EXEC_THRESHOLD) return null;
-  return best;
-}
-
-/**
- * General phase-2 transcript router.
- *
- * Core question: does the transcript confidently match one of our known
- * deterministic affordances? If yes, use that deterministic path. If not, fall
- * back to Gemma/Pi as a normal message.
- *
- * Buckets:
- * - deterministic: known affordance; executionMode chooses direct_exec or pi_skill.
- * - normal_msg: safe fallback; send the transcript to Pi normally.
- *
- * Execution modes:
- * - direct_exec: exact, explicitly opted-in read-only script path.
- * - pi_skill: contextual skill expansion path.
- */
-export function routeVoiceTranscript(text: string, resources: RouteResources): VoiceRouteDecision {
+export async function routeVoiceTranscript(text: string, resources: RouteResources): Promise<VoiceRouteDecision> {
   const cleaned = text.trim();
-  const { catalog, actions: directActions } = resources;
-  const compiler = compileVoiceCommand(cleaned, resources);
-
+  const compiler = await compileVoiceCommand(cleaned, resources);
   if (compiler.handled) {
-    const gate: BroadGateDecision = {
-      bucket: "deterministic",
-      deterministicKind: "skill_or_action",
-      confidence: compiler.confidence,
-      reason: "typed command compiler selected deterministic command",
-      matchedTerms: compiler.matchedTerms,
-      matchedFamilies: compiler.trace.selectedIR?.kind === "command" ? [compiler.trace.selectedIR.domain] : [],
-    };
     return {
       bucket: "deterministic",
       executionMode: compiler.executionMode,
-      broadGate: gate,
       candidateSkill: compiler.candidateSkill,
       directExec: compiler.directExec,
       confidence: compiler.confidence,
@@ -692,73 +391,17 @@ export function routeVoiceTranscript(text: string, resources: RouteResources): V
     };
   }
 
-  const gate = broadGate(cleaned, catalog, directActions);
-
-  if (gate.bucket === "normal_msg") {
-    return {
-      bucket: "normal_msg",
-      executionMode: null,
-      broadGate: gate,
-      candidateSkill: null,
-      directExec: null,
-      confidence: gate.confidence,
-      reason: "broad gate chose normal_msg; default normal message to Pi",
-      text: cleaned,
-      matchedTerms: gate.matchedTerms,
-      matchedIntents: [],
-      topCandidates: [],
-      compilerTrace: compiler.trace,
-      timestamp: new Date().toISOString(),
-    };
-  }
-
-  // Deterministic broad bucket: first select the affordance/skill. This selector
-  // is the planned replacement point for embeddings, followed later by optional CE reranking.
-  const candidates = selectSkillCandidate(cleaned, catalog, gate.matchedFamilies);
-  const best = candidates[0];
-  const second = candidates[1];
-  const margin = best && second ? best.score - second.score : best ? best.score : 0;
-  const skillConfident = Boolean(best && best.score >= PI_SKILL_THRESHOLD && (!second || margin >= PI_SKILL_MARGIN));
-  const selectedSkill = skillConfident && best ? best : null;
-  const attachIntentSkill = best?.matchedIntents.length ? best : null;
-
-  // Third node: if metadata says a script is safe and the request is exact enough,
-  // route as direct_exec. Otherwise deterministic requests use the contextual skill path.
-  const directExec = selectDirectExecCandidate(cleaned, directActions, selectedSkill ?? attachIntentSkill);
-  if (directExec) {
-    return {
-      bucket: "deterministic",
-      executionMode: "direct_exec",
-      broadGate: gate,
-      candidateSkill: directExec.skill,
-      directExec,
-      confidence: directExec.score,
-      reason: `broad gate chose deterministic; execution gate selected direct_exec above threshold (${DIRECT_EXEC_THRESHOLD})`,
-      text: cleaned,
-      matchedTerms: directExec.matchedTerms,
-      matchedIntents: directExec.matchedIntents,
-      topCandidates: candidates,
-      compilerTrace: compiler.trace,
-      timestamp: new Date().toISOString(),
-    };
-  }
-
   return {
-    bucket: skillConfident ? "deterministic" : "normal_msg",
-    executionMode: skillConfident ? "pi_skill" : null,
-    broadGate: gate,
-    candidateSkill: selectedSkill?.skill ?? null,
+    bucket: "normal_msg",
+    executionMode: null,
+    candidateSkill: null,
     directExec: null,
-    confidence: best ? best.score : gate.confidence,
-    reason: skillConfident
-      ? `broad gate chose deterministic; selector matched skill above threshold (${PI_SKILL_THRESHOLD}) and margin (${PI_SKILL_MARGIN}); execution gate chose contextual pi_skill path`
-      : best
-        ? "broad gate chose deterministic, but selector confidence/margin was too low; default normal message to Pi"
-        : "broad gate chose deterministic, but selector found no candidate; default normal message to Pi",
+    confidence: compiler.confidence,
+    reason: compiler.reason || "compiler did not produce an executable deterministic command; default normal message to Pig",
     text: cleaned,
-    matchedTerms: best?.matchedTerms ?? gate.matchedTerms,
-    matchedIntents: best?.matchedIntents ?? [],
-    topCandidates: candidates,
+    matchedTerms: compiler.matchedTerms,
+    matchedIntents: compiler.matchedIntents,
+    topCandidates: [],
     compilerTrace: compiler.trace,
     timestamp: new Date().toISOString(),
   };
@@ -777,18 +420,11 @@ export function logVoiceRouteDecision(decision: VoiceRouteDecision): void {
 
 export function resolveSkill(name: string, catalog?: SkillCatalogEntry[]): ResolvedSkill | null {
   if (!/^[a-z0-9-]+$/.test(name)) return null;
-
   const catalogEntry = catalog?.find((entry) => entry.name === name);
   if (!catalogEntry || !existsSync(catalogEntry.filePath)) return null;
   const raw = readFileSync(catalogEntry.filePath, "utf-8");
   const parsed = parseFrontmatter(raw);
-  return {
-    name,
-    filePath: catalogEntry.filePath,
-    baseDir: catalogEntry.baseDir,
-    body: parsed.body.trim(),
-  };
-
+  return { name, filePath: catalogEntry.filePath, baseDir: catalogEntry.baseDir, body: parsed.body.trim() };
 }
 
 export function buildSkillUserMessage(skill: ResolvedSkill, userText: string): string {

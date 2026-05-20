@@ -6,21 +6,25 @@ It is intentionally scoped to deterministic computer-use commands on Unix-like s
 
 ## Current Baseline
 
-The code currently does:
+The code now uses the command compiler as the routing authority:
 
 ```text
 Pi discovers skills
 Pig reads skill commands from pi.getCommands()
 Pig loads adjacent routing/direct-exec metadata
-Pig applies broad family gates
-Pig scores eligible metadata with BM25
-Pig thresholds direct execution
-Pig falls back to skill expansion or normal chat
+Pig runs an extractor stack
+  - exact/rule placeholder extractor
+  - metadata BM25 extractor over compiler.json
+  - optional FastEmbed semantic extractor over compiler.json
+extractors emit CommandIR candidates
+Pig typechecks, resolves references, lowers via table-loaded metadata rules, then checks metadata-required preconditions
+Pig executes eligible direct_exec actions or expands a pi_skill
+Pig falls back to normal chat when the compiler does not produce a valid command
 ```
 
-That baseline is useful, but it is still label-centric.
+BM25 is no longer a router or skill selector. BM25 and optional embeddings are extractors that emit typed candidates from `compiler.json` metadata evidence.
 
-The refactor goal is to ask:
+The architecture asks:
 
 ```text
 What typed command is being requested?
@@ -103,18 +107,11 @@ type WeatherCommandIR = {
 
 The schema can grow later, but the first pass should stay small.
 
-## Stage 1: Gate
+## Stage 1: Extractor Eligibility And Candidate Production
 
-The gate decides broad route before detailed extraction:
+The old semantic broad gate has been removed. The Pig extension still bypasses explicit slash commands and already-expanded skill blocks at the input hook, but normal user text goes to the compiler extractor stack.
 
-```text
-chat
-local_command
-weather/info_lookup
-vision
-search
-ambiguous
-```
+Extractor outputs, candidate ranking, typechecking, and lowering now replace the old `deterministic | normal_msg` broad gate.
 
 This prevents mistakes like:
 
@@ -122,30 +119,7 @@ This prevents mistakes like:
 how are you today -> weather
 ```
 
-while still allowing:
-
-```text
-how is the weather today -> weather.lookup
-```
-
-Weather routing should require an actual weather concept:
-
-```text
-weather
-forecast
-rain
-snow
-temperature
-temp
-wind
-outside
-jacket
-storm
-radar
-humidity
-```
-
-Bare time words like `today` must not be enough.
+by making weather extraction require actual weather evidence and by letting chat/no-command candidates fall through to normal Pig/Gemma handling. Bare time words like `today` must not be enough.
 
 ## Stage 2: Parser / Extractor
 
@@ -375,16 +349,54 @@ Current staged plan:
    - state snapshot: `src/compiler/state.ts`
    - typecheck: `src/compiler/typecheck.ts`
    - reference resolution: `src/compiler/resolve.ts`
-   - preconditions: `src/compiler/preconditions.ts`
-   - metadata/table-driven lowering: `src/compiler/lower.ts`
+   - metadata-required preconditions: `src/compiler/preconditions.ts`
+   - table-loaded lowering from `compiler.json`: `src/compiler/lower.ts`
    - orchestration/trace: `src/compiler/compiler.ts`
-5. Route through the compiler first, then fall back to the legacy metadata/BM25 router when the compiler emits chat, fails validation, misses preconditions, or cannot lower. **Done:** `routeVoiceTranscript()` now attaches `compilerTrace` to route decisions.
-6. Keep required-context checks as preconditions and keep direct-exec safety metadata as the executor/lowering eligibility source.
-7. Keep BM25 only as a backup stabilizer during transition.
+5. Add metadata BM25 as an extractor, not a router. **Done:** `src/compiler/metadataBm25Extractor.ts` emits `CommandIRCandidate`s from `compiler.json` intent metadata.
+6. Add optional semantic extraction. **Done:** `src/compiler/embeddingExtractor.ts` uses FastEmbed when `PIG_ENABLE_EMBEDDING_EXTRACTOR=1`, otherwise returns no candidates.
+7. Route through the compiler only; when the compiler emits chat, fails validation, misses preconditions, or cannot lower, return `normal_msg`. **Done:** `routeVoiceTranscript()` is now a compiler wrapper and attaches `compilerTrace` to route decisions.
+7. Keep required-context checks as preconditions and keep direct-exec safety metadata as the executor/lowering eligibility source.
 8. Add regression tests for screenshot, photo, and weather confusion. **Started:** `tests/compiler-smoke.mjs` covers the core flow after `npm run build`.
 9. Replace the placeholder extractor with the real extractor once the compiler contract and trace shape are stable.
 
 The temporary extractor should not receive much investment. Its purpose is only to exercise the typed compiler pipeline so the rest of the architecture can be debugged now.
+
+## Compiler Metadata
+
+Each skill can provide `compiler.json` beside `SKILL.md`, `routing.json`, and `direct-exec.json`.
+
+```json
+{
+  "intents": [
+    {
+      "id": "visual_inspect",
+      "ir": {
+        "kind": "command",
+        "domain": "screen",
+        "action": "inspect",
+        "object": "screen",
+        "target": "current",
+        "intent": "visual_inspect"
+      },
+      "examples": ["look at my screen"],
+      "keywords": ["inspect screen"],
+      "negativeExamples": ["open the screenshot"]
+    }
+  ],
+  "lowering": [
+    {
+      "match": { "domain": "screen", "action": "inspect" },
+      "actionId": "take-screenshot.capture",
+      "fallbackSkill": "take-screenshot",
+      "matchedIntents": ["visual_inspect"],
+      "requiredContext": ["active_display"],
+      "reason": "lowered screen inspection to screenshot capture with image attachment"
+    }
+  ]
+}
+```
+
+`intents` are language evidence for extractors. `lowering` maps validated IR patterns to existing safe actions or skill fallback. `requiredContext` is metadata, but the actual checks remain code-owned in `preconditions.ts`.
 
 ## Initial Domains
 
