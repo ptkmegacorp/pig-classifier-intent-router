@@ -39,7 +39,7 @@ export async function compileVoiceCommand(text: string, resources: RouteResource
     return { handled: false, trace, executionMode: null, candidateSkill: null, directExec: null, confidence: selected.confidence, reason: trace.fallbackReason, matchedTerms: candidates[0]?.matchedTerms ?? [], matchedIntents: [] };
   }
 
-  const typecheck = typecheckCommandIR(selected);
+  const typecheck = typecheckCommandIR(selected, resources);
   trace.typecheck = typecheck;
   if (!typecheck.ok) {
     trace.fallbackReason = `typecheck failed: ${typecheck.errors.join("; ")}`;

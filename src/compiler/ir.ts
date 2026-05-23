@@ -1,10 +1,11 @@
 import type { DirectExecCandidate, RoutingIntent } from "../router.js";
 import type { PigCommandState } from "./state.js";
 
-export type CommandDomain = "screen" | "image" | "weather";
-export type CommandAction = "capture" | "open" | "show" | "inspect" | "lookup";
-export type CommandObject = "screen" | "screenshot" | "photo" | "image" | "weather";
-export type CommandTarget = "current" | "last" | "recent" | "attached";
+export type CommandDomain = string;
+export type CommandAction = string;
+export type CommandObject = string;
+export type CommandTarget = string;
+export type CommandSlots = Record<string, string | number | boolean | null | string[]>;
 
 export interface ChatIR {
   kind: "chat";
@@ -12,40 +13,24 @@ export interface ChatIR {
   confidence: number;
 }
 
-export interface BaseCommandIR {
+export interface CommandIRShape {
   kind: "command";
   domain: CommandDomain;
   action: CommandAction;
   object: CommandObject;
   target?: CommandTarget;
+  slots?: CommandSlots;
   confidence: number;
   intent?: RoutingIntent;
-}
-
-export interface ScreenCommandIR extends BaseCommandIR {
-  domain: "screen";
-  action: "capture" | "open" | "show" | "inspect";
-  object: "screen" | "screenshot";
-  target?: "current" | "last" | "recent";
-}
-
-export interface ImageCommandIR extends BaseCommandIR {
-  domain: "image";
-  action: "capture" | "open" | "show" | "inspect";
-  object: "photo" | "image";
-  target?: "current" | "last" | "recent" | "attached";
-}
-
-export interface WeatherCommandIR extends BaseCommandIR {
-  domain: "weather";
-  action: "lookup";
-  object: "weather";
-  target?: "current";
-  time?: "today" | "tomorrow" | "tonight" | string;
+  /** Compatibility convenience fields; new domains should prefer slots. */
+  time?: string;
   location?: string;
 }
 
-export type CommandIR = ChatIR | ScreenCommandIR | ImageCommandIR | WeatherCommandIR;
+export type ScreenCommandIR = CommandIRShape;
+export type ImageCommandIR = CommandIRShape;
+export type WeatherCommandIR = CommandIRShape;
+export type CommandIR = ChatIR | CommandIRShape;
 
 export interface CommandIRCandidate {
   ir: CommandIR;
@@ -60,7 +45,7 @@ export interface TypecheckResult {
 }
 
 export interface ResolvedCommand {
-  ir: Exclude<CommandIR, ChatIR>;
+  ir: CommandIRShape;
   refs: Record<string, string>;
   state: PigCommandState;
 }

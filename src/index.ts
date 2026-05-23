@@ -7,6 +7,7 @@ import { compileVoiceCommand, DEFAULT_EXTRACTOR_STACK } from "./compiler/compile
 import { defaultCommandExtractor } from "./compiler/defaultExtractor.js";
 import { metadataBm25Extractor } from "./compiler/metadataBm25Extractor.js";
 import { embeddingExtractor } from "./compiler/embeddingExtractor.js";
+import { createTransformersEmbeddingsProvider, getEmbeddingsProvider, setEmbeddingsProviderFactory } from "./compiler/embeddingsProvider.js";
 import { runExtractorStack } from "./compiler/extractors.js";
 import { getLoweringRules } from "./compiler/lower.js";
 import { getPigCommandState } from "./compiler/state.js";
@@ -30,6 +31,9 @@ export {
   defaultCommandExtractor,
   metadataBm25Extractor,
   embeddingExtractor,
+  createTransformersEmbeddingsProvider,
+  getEmbeddingsProvider,
+  setEmbeddingsProviderFactory,
   getLoweringRules,
   getPigCommandState,
   runExtractorStack,

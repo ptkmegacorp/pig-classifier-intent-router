@@ -1,30 +1,45 @@
+import type { CompilerCommandSchemaMetadata, RouteResources } from "../router.js";
 import type { CommandIR, TypecheckResult } from "./ir.js";
 
-const allowed = {
-  screen: {
-    capture: new Set(["screenshot"]),
-    open: new Set(["screenshot"]),
-    show: new Set(["screenshot"]),
-    inspect: new Set(["screen", "screenshot"]),
-  },
-  image: {
-    capture: new Set(["photo", "image"]),
-    open: new Set(["photo", "image"]),
-    show: new Set(["photo", "image"]),
-    inspect: new Set(["photo", "image"]),
-  },
-  weather: {
-    lookup: new Set(["weather"]),
-  },
-} as const;
+function asList(value: unknown): string[] | null {
+  if (typeof value === "string") return [value];
+  if (Array.isArray(value) && value.every((item) => typeof item === "string")) return value;
+  return null;
+}
 
-export function typecheckCommandIR(ir: CommandIR): TypecheckResult {
+function matches(expected: unknown, actual: string | undefined): boolean {
+  const list = asList(expected);
+  if (!list) return true;
+  if (!actual) return false;
+  return list.includes(actual);
+}
+
+function schemas(resources: RouteResources): CompilerCommandSchemaMetadata[] {
+  return resources.catalog.flatMap((skill) => skill.compilerSchemas);
+}
+
+export function typecheckCommandIR(ir: CommandIR, resources: RouteResources): TypecheckResult {
   if (ir.kind === "chat") return { ok: true, errors: [] };
-  const domain = allowed[ir.domain];
-  if (!domain) return { ok: false, errors: [`unsupported domain: ${ir.domain}`] };
-  const objects = (domain as Record<string, Set<string>>)[ir.action];
-  if (!objects) return { ok: false, errors: [`${ir.domain} does not support action: ${ir.action}`] };
-  if (!objects.has(ir.object)) return { ok: false, errors: [`${ir.domain}.${ir.action} does not support object: ${ir.object}`] };
-  if ((ir.action === "open" || ir.action === "show") && !ir.target) return { ok: false, errors: [`${ir.domain}.${ir.action}.${ir.object} requires target`] };
-  return { ok: true, errors: [] };
+  const allSchemas = schemas(resources);
+  if (allSchemas.length === 0) return { ok: false, errors: ["no compiler command schemas loaded"] };
+
+  const matchedDomain = allSchemas.filter((schema) => matches(schema.match.domain, ir.domain));
+  if (matchedDomain.length === 0) return { ok: false, errors: [`unsupported domain: ${ir.domain}`] };
+
+  const matched = matchedDomain.filter((schema) =>
+    matches(schema.match.action, ir.action)
+    && matches(schema.match.object, ir.object)
+    && matches(schema.match.target, ir.target)
+  );
+  if (matched.length === 0) return { ok: false, errors: [`no schema matched ${ir.domain}.${ir.action}.${ir.object}${ir.target ? `.${ir.target}` : ""}`] };
+
+  const missing: string[] = [];
+  const fields = new Set(Object.keys(ir));
+  const slots = ir.slots ?? {};
+  for (const schema of matched) {
+    const missingForSchema = schema.requiredFields.filter((field) => !fields.has(field) && !(field in slots));
+    if (missingForSchema.length === 0) return { ok: true, errors: [] };
+    missing.push(...missingForSchema);
+  }
+  return { ok: false, errors: [`missing required field(s): ${[...new Set(missing)].join(", ")}`] };
 }

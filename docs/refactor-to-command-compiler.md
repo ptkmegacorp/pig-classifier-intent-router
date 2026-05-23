@@ -15,7 +15,7 @@ Pig loads adjacent routing/direct-exec metadata
 Pig runs an extractor stack
   - exact/rule placeholder extractor
   - metadata BM25 extractor over compiler.json
-  - optional FastEmbed semantic extractor over compiler.json
+  - optional EmbeddingsProvider semantic extractor over compiler.json
 extractors emit CommandIR candidates
 Pig typechecks, resolves references, lowers via table-loaded metadata rules, then checks metadata-required preconditions
 Pig executes eligible direct_exec actions or expands a pi_skill
@@ -46,29 +46,23 @@ utterance
   -> parser / extractor
   -> CommandIR candidates
   -> typecheck
-  -> resolve references
-  -> check preconditions
+  -> resolve references using provider registry over Pig/OS/WM state
+  -> check metadata-required preconditions using provider registry
   -> lower to deterministic action
   -> execute
   -> update state / log
 ```
 
-The model or extractor proposes structure. Pig validates, resolves, lowers, executes, and logs.
+The model or extractor proposes structure. Pig validates, asks providers for current computer state, resolves references, lowers, executes, and logs.
 
 ## CommandIR
 
-Define a small typed intermediate representation.
+CommandIR is now intentionally string-based so the compiler can grow without editing TypeScript unions for every new computer-control domain.
 
-Suggested initial TypeScript shape:
+Current shape:
 
 ```ts
-type CommandIR =
-  | ChatIR
-  | ScreenCommandIR
-  | ImageCommandIR
-  | WeatherCommandIR
-  | FileCommandIR
-  | SearchCommandIR;
+type CommandIR = ChatIR | CommandIRShape;
 
 type ChatIR = {
   kind: "chat";
@@ -76,36 +70,19 @@ type ChatIR = {
   confidence: number;
 };
 
-type ScreenCommandIR = {
+type CommandIRShape = {
   kind: "command";
-  domain: "screen";
-  action: "capture" | "open" | "show" | "inspect";
-  object: "screenshot" | "screen";
-  target?: "current" | "last" | "recent";
-  confidence: number;
-};
-
-type ImageCommandIR = {
-  kind: "command";
-  domain: "image";
-  action: "capture" | "open" | "show" | "inspect";
-  object: "photo" | "image";
-  target?: "current" | "last" | "recent" | "attached";
-  confidence: number;
-};
-
-type WeatherCommandIR = {
-  kind: "command";
-  domain: "weather";
-  action: "lookup";
-  object: "weather";
-  time?: "today" | "tomorrow" | string;
-  location?: string;
+  domain: string;
+  action: string;
+  object: string;
+  target?: string;
+  slots?: Record<string, string | number | boolean | null | string[]>;
+  intent?: string;
   confidence: number;
 };
 ```
 
-The schema can grow later, but the first pass should stay small.
+Valid command schemas live in `compiler.json`, not fixed TypeScript unions. The center validates candidates against loaded metadata schemas before resolving, lowering, or executing.
 
 ## Stage 1: Extractor Eligibility And Candidate Production
 
@@ -136,11 +113,11 @@ small model output
 
 These tools propose structure. They do not decide execution.
 
-Embeddings are not part of the first implementation pass.
+BM25 + metadata are the default source of truth. Embeddings are available as optional semantic recall with `PIG_ENABLE_EMBEDDING_EXTRACTOR=1`; the extractor depends on an `EmbeddingsProvider` interface, not a specific runtime/server, and document vectors are cached per route resource set.
 
 ## Stage 3: Typechecker
 
-The typechecker rejects invalid command structures before resolution or execution.
+The typechecker rejects invalid command structures before resolution or execution by matching candidates against `compiler.json` schemas.
 
 Example invalid structure:
 
@@ -153,7 +130,7 @@ Example invalid structure:
 }
 ```
 
-Weather supports `lookup`, not `open`, so this must be rejected or routed to fallback.
+If no loaded metadata schema supports `weather.open.weather`, this must be rejected or routed to fallback.
 
 Typechecking should answer:
 
@@ -292,9 +269,9 @@ Keep these responsibilities separate:
 BM25             = exact word grounding
 Extractor        = utterance -> CommandIR candidates
 Typechecker      = reject invalid structures
-Reference resolver = map references to state
-Precondition checker = verify required context
-Lowering table   = CommandIR -> exact script/tool
+Reference resolver = map references to live Pig/OS/WM state providers
+Precondition checker = verify metadata-required context through provider registry
+Lowering metadata/table = CommandIR -> exact script/tool
 Executor         = run deterministic action and update state
 Gemma            = ambiguity, fallback, general chat, explanations
 ```
@@ -316,9 +293,9 @@ required context checks
 route/execution logging
 ```
 
-Keep BM25 as a stabilizer if useful.
+Keep BM25 + metadata as the default source of truth.
 
-Do not add embeddings in the first compiler pass.
+Use embeddings as optional semantic recall, not the main control plane.
 
 ## What To Replace
 
@@ -353,11 +330,11 @@ Current staged plan:
    - table-loaded lowering from `compiler.json`: `src/compiler/lower.ts`
    - orchestration/trace: `src/compiler/compiler.ts`
 5. Add metadata BM25 as an extractor, not a router. **Done:** `src/compiler/metadataBm25Extractor.ts` emits `CommandIRCandidate`s from `compiler.json` intent metadata.
-6. Add optional semantic extraction. **Done:** `src/compiler/embeddingExtractor.ts` uses FastEmbed when `PIG_ENABLE_EMBEDDING_EXTRACTOR=1`, otherwise returns no candidates.
+6. Add optional semantic extraction. **Done:** `src/compiler/embeddingExtractor.ts` uses the swappable `EmbeddingsProvider` interface when `PIG_ENABLE_EMBEDDING_EXTRACTOR=1`, otherwise returns no candidates. The default provider uses `@huggingface/transformers`, but callers can replace it with a local server/runtime provider.
 7. Route through the compiler only; when the compiler emits chat, fails validation, misses preconditions, or cannot lower, return `normal_msg`. **Done:** `routeVoiceTranscript()` is now a compiler wrapper and attaches `compilerTrace` to route decisions.
-7. Keep required-context checks as preconditions and keep direct-exec safety metadata as the executor/lowering eligibility source.
-8. Add regression tests for screenshot, photo, and weather confusion. **Started:** `tests/compiler-smoke.mjs` covers the core flow after `npm run build`.
-9. Replace the placeholder extractor with the real extractor once the compiler contract and trace shape are stable.
+8. Keep required-context checks as metadata-declared preconditions with code-owned provider registry, and keep direct-exec safety metadata as the executor/lowering eligibility source.
+9. Add regression tests for screenshot, photo, and weather confusion. **Started:** `tests/compiler-smoke.mjs` covers the core flow after `npm run build`.
+10. Replace the placeholder extractor with the real extractor once the compiler contract and trace shape are stable.
 
 The temporary extractor should not receive much investment. Its purpose is only to exercise the typed compiler pipeline so the rest of the architecture can be debugged now.
 
@@ -383,6 +360,12 @@ Each skill can provide `compiler.json` beside `SKILL.md`, `routing.json`, and `d
       "negativeExamples": ["open the screenshot"]
     }
   ],
+  "schemas": [
+    {
+      "match": { "domain": "screen", "action": ["capture", "inspect"], "object": ["screen", "screenshot"] },
+      "requiredFields": ["domain", "action", "object"]
+    }
+  ],
   "lowering": [
     {
       "match": { "domain": "screen", "action": "inspect" },
@@ -396,7 +379,7 @@ Each skill can provide `compiler.json` beside `SKILL.md`, `routing.json`, and `d
 }
 ```
 
-`intents` are language evidence for extractors. `lowering` maps validated IR patterns to existing safe actions or skill fallback. `requiredContext` is metadata, but the actual checks remain code-owned in `preconditions.ts`.
+`intents` are language evidence for extractors. `schemas` define valid command shapes. `lowering` maps validated IR patterns to existing safe actions or skill fallback. `requiredContext` is metadata, but the actual checks remain code-owned provider functions in `preconditions.ts`. References are resolved by `resolve.ts` providers over live state from `state.ts`, which can query Ubuntu/i3/X11/clipboard/filesystem instead of forcing everything into stored memory.
 
 ## Initial Domains
 

@@ -37,6 +37,11 @@ export interface CompilerIntentMetadata {
   negativeExamples: string[];
 }
 
+export interface CompilerCommandSchemaMetadata {
+  match: Record<string, unknown>;
+  requiredFields: string[];
+}
+
 export interface CompilerLoweringMetadata {
   match: Record<string, unknown>;
   actionId?: string;
@@ -58,6 +63,7 @@ export interface SkillCatalogEntry {
   negativeExamples: string[];
   intents: Record<RoutingIntent, RoutingIntentMetadata>;
   compilerIntents: CompilerIntentMetadata[];
+  compilerSchemas: CompilerCommandSchemaMetadata[];
   compilerLowering: CompilerLoweringMetadata[];
 }
 
@@ -224,15 +230,19 @@ function loadRoutingMetadata(skillDir: string): RoutingMetadata {
   }
 }
 
-function loadCompilerMetadata(skillDir: string): { intents: CompilerIntentMetadata[]; lowering: CompilerLoweringMetadata[] } {
+function loadCompilerMetadata(skillDir: string): { intents: CompilerIntentMetadata[]; schemas: CompilerCommandSchemaMetadata[]; lowering: CompilerLoweringMetadata[] } {
   const path = join(skillDir, "compiler.json");
-  if (!existsSync(path)) return { intents: [], lowering: [] };
+  if (!existsSync(path)) return { intents: [], schemas: [], lowering: [] };
   try {
     const raw = JSON.parse(readFileSync(path, "utf-8"));
     const intents = Array.isArray(raw.intents) ? raw.intents.flatMap((item: any): CompilerIntentMetadata[] => {
       const id = routingIntent(item?.id);
       if (!id || !item?.ir || typeof item.ir !== "object") return [];
       return [{ id, ir: item.ir, examples: stringArray(item.examples), keywords: stringArray(item.keywords), negativeExamples: stringArray(item.negativeExamples) }];
+    }) : [];
+    const schemas = Array.isArray(raw.schemas) ? raw.schemas.flatMap((item: any): CompilerCommandSchemaMetadata[] => {
+      if (!item?.match || typeof item.match !== "object") return [];
+      return [{ match: item.match, requiredFields: stringArray(item.requiredFields) }];
     }) : [];
     const lowering = Array.isArray(raw.lowering) ? raw.lowering.flatMap((item: any): CompilerLoweringMetadata[] => {
       if (!item?.match || typeof item.match !== "object" || typeof item.fallbackSkill !== "string") return [];
@@ -245,9 +255,9 @@ function loadCompilerMetadata(skillDir: string): { intents: CompilerIntentMetada
         reason: typeof item.reason === "string" ? item.reason : undefined,
       }];
     }) : [];
-    return { intents, lowering };
+    return { intents, schemas, lowering };
   } catch {
-    return { intents: [], lowering: [] };
+    return { intents: [], schemas: [], lowering: [] };
   }
 }
 
@@ -306,6 +316,7 @@ export function loadSkillCatalogFromCommands(commands: DiscoveredSkillCommand[])
         negativeExamples: routing.negativeExamples,
         intents: routing.intents,
         compilerIntents: compiler.intents,
+        compilerSchemas: compiler.schemas,
         compilerLowering: compiler.lowering,
       });
     } catch {

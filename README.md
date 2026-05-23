@@ -1,6 +1,6 @@
 # pig-classifier-intent-router
 
-Pig extension package for routing voice/audio transcripts and other Pig input through a deterministic-affordance classifier in Pig's input layer.
+Pig extension package whose big goal is to be a **natural-language to Unix-style computer-control compiler** for the Pig fork of Pi.
 
 Core question:
 
@@ -19,17 +19,17 @@ input eligibility is handled by the Pig input hook
 → extractor stack
    - temporary exact/rule extractor
    - metadata BM25 extractor over `compiler.json` intent metadata
-   - optional FastEmbed embedding extractor over the same metadata (`PIG_ENABLE_EMBEDDING_EXTRACTOR=1`)
+   - optional embedding extractor over the same metadata (`PIG_ENABLE_EMBEDDING_EXTRACTOR=1`)
 → CommandIR candidate selection
-→ typecheck
-→ Pig command state / reference resolution
-→ preconditions
-→ table-driven lowering
+→ metadata schema validation
+→ live OS/WM-backed state snapshot / provider-based reference resolution
+→ metadata-required preconditions via provider registry
+→ metadata table-loaded lowering
 → direct_exec or pi_skill
 → otherwise normal_msg
 ```
 
-BM25 and embeddings are now extractors, not routers. They emit `CommandIRCandidate`s from `compiler.json` metadata evidence; they do not select scripts or bypass compiler validation. The first exact/rule extractor is intentionally a placeholder; the important pieces now in place are CommandIR, stackable async extractor boundaries, metadata BM25 extraction, optional FastEmbed semantic extraction, Pig command state, typechecking, reference resolution, metadata-driven preconditions, table-loaded lowering to existing safe direct-exec actions, and compiler trace logging.
+BM25 and embeddings are extractors, not routers. They emit `CommandIRCandidate`s from `compiler.json` metadata evidence; they do not select scripts or bypass compiler validation. BM25 + metadata are the default source of truth; embeddings are optional semantic recall. The center validates against metadata command schemas instead of fixed TypeScript domain unions. The first exact/rule extractor is intentionally a placeholder; the important pieces now in place are string-based CommandIR, stackable async extractor boundaries, metadata BM25 extraction, optional cached EmbeddingsProvider semantic extraction, live Pig/OS/WM state providers, metadata schema validation, provider-based reference resolution, metadata-driven preconditions via provider registry, table-loaded lowering to existing safe direct-exec actions, and compiler trace logging.
 
 ## Buckets
 
